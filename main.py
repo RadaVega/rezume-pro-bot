@@ -102,6 +102,46 @@ def run_flask():
     """Запускает Flask сервер в отдельном потоке"""
     app.run(host='0.0.0.0', port=5000)
 
+# === Отправка PDF-файла через VK API ===
+def send_pdf_to_user(vk, user_id: int, pdf_path: str, vk_token: str) -> bool:
+    """
+    Загружает PDF на сервер VK и отправляет пользователю как вложение.
+    Возвращает True если успешно.
+    """
+    try:
+        # 1. Получаем URL для загрузки документа
+        upload_server = vk.docs.getMessagesUploadServer(peer_id=user_id)
+        upload_url = upload_server['upload_url']
+        logger.info(f"📤 URL для загрузки: {upload_url[:60]}...")
+
+        # 2. Загружаем файл
+        with open(pdf_path, 'rb') as f:
+            resp = requests.post(upload_url, files={'file': ('resume.pdf', f, 'application/pdf')})
+        upload_data = resp.json()
+        logger.info(f"📤 Ответ загрузки: {upload_data}")
+
+        # 3. Сохраняем документ через VK API
+        saved = vk.docs.save(file=upload_data['file'], title='Адаптированное резюме.pdf')
+        doc = saved[0] if isinstance(saved, list) else saved.get('doc', saved)
+
+        owner_id = doc.get('owner_id')
+        doc_id = doc.get('id')
+        attachment = f"doc{owner_id}_{doc_id}"
+        logger.info(f"✅ Документ сохранён: {attachment}")
+
+        # 4. Отправляем сообщение с вложением
+        vk.messages.send(
+            peer_id=user_id,
+            message="📄 Вот твоё адаптированное резюме в формате PDF:",
+            attachment=attachment,
+            random_id=0
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки PDF: {e}")
+        return False
+
 # === GigaChat Функция адаптации резюме ===
 def adapt_resume_with_gigachat(resume_text: str, vacancy_text: str) -> str:
     """Адаптирует резюме под вакансию с помощью GigaChat"""
@@ -406,30 +446,37 @@ def run_bot():
                                 vacancy_text
                             )
                             
-                            # Генерируем PDF
+                            # Сначала отправляем текстовый результат
+                            vk.messages.send(
+                                peer_id=user_id,
+                                message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result,
+                                random_id=0
+                            )
+
+                            # Генерируем и отправляем PDF
                             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as f:
                                 pdf_path = f.name
-                            
+
                             if create_resume_pdf(result, pdf_path):
-                                # Отправляем текст + PDF
-                                vk.messages.send(
-                                    peer_id=user_id,
-                                    message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result[:1000] + "\n\n📄 PDF версия готова!",
-                                    random_id=0
-                                )
+                                sent = send_pdf_to_user(vk, user_id, pdf_path, VK_TOKEN)
+                                if not sent:
+                                    vk.messages.send(
+                                        peer_id=user_id,
+                                        message="⚠️ PDF создан, но не удалось отправить файл. Сохрани текст выше.",
+                                        random_id=0
+                                    )
                             else:
                                 vk.messages.send(
                                     peer_id=user_id,
-                                    message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result,
+                                    message="⚠️ Не удалось сгенерировать PDF. Используй текст выше.",
                                     random_id=0
                                 )
-                            
-                            # Очищаем
+
                             try:
                                 os.unlink(pdf_path)
                             except:
                                 pass
-                            
+
                             user_states[user_id].step = "idle"
                             
                         else:
