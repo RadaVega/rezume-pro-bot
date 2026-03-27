@@ -207,6 +207,26 @@ class UserState:
         self.has_file = False
         self.step = "idle"  # idle, waiting_vacancy, waiting_resume, processing
 
+VK_MAX_MSG = 4096
+
+def send_long_message(vk, peer_id, text):
+    """Отправляет текст, разбивая на части, если он длиннее лимита VK (4096 символов)."""
+    if len(text) <= VK_MAX_MSG:
+        vk.messages.send(peer_id=peer_id, message=text, random_id=0)
+        return
+    lines = text.split('\n')
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > VK_MAX_MSG:
+            if chunk:
+                vk.messages.send(peer_id=peer_id, message=chunk.strip(), random_id=0)
+            chunk = line + '\n'
+        else:
+            chunk += line + '\n'
+    if chunk.strip():
+        vk.messages.send(peer_id=peer_id, message=chunk.strip(), random_id=0)
+
+
 def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN):
     """Обрабатывает одно входящее сообщение."""
     text = raw_text.lower()
@@ -341,11 +361,7 @@ def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN):
                 vk.messages.send(peer_id=user_id, message="🤖 Начинаю адаптацию... ⏱️ ~30 секунд", random_id=0)
                 result = adapt_resume_with_gigachat(user_states[user_id].resume_text, vacancy_text)
 
-                vk.messages.send(
-                    peer_id=user_id,
-                    message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result,
-                    random_id=0
-                )
+                send_long_message(vk, user_id, "✅ Готово! Вот твоё адаптированное резюме:\n\n" + result)
 
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as f:
                     pdf_path = f.name
@@ -385,12 +401,12 @@ def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN):
                 user_states[user_id].vacancy_text = vacancy_text
                 vk.messages.send(peer_id=user_id, message="🤖 Адаптирую резюме... ⏱️ ~30 секунд", random_id=0)
                 result = adapt_resume_with_gigachat(resume, vacancy_text)
-                vk.messages.send(peer_id=user_id, message="✅ Готово!\n\n" + result, random_id=0)
+                send_long_message(vk, user_id, "✅ Готово!\n\n" + result)
                 user_states[user_id].step = "idle"
         elif user_states[user_id].vacancy_text:
             vk.messages.send(peer_id=user_id, message="🤖 Адаптирую резюме... ⏱️ ~30 секунд", random_id=0)
             result = adapt_resume_with_gigachat(resume, user_states[user_id].vacancy_text)
-            vk.messages.send(peer_id=user_id, message="✅ Готово!\n\n" + result, random_id=0)
+            send_long_message(vk, user_id, "✅ Готово!\n\n" + result)
             user_states[user_id].step = "idle"
         else:
             vk.messages.send(
