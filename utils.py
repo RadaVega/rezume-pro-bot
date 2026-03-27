@@ -207,6 +207,10 @@ def generate_resume_pdf(resume_text: str, output_path: str):
         logger.error(f"❌ Ошибка генерации PDF: {e}")
         return False
 
+def create_resume_pdf(resume_text: str, output_path: str):
+    """Алиас для generate_resume_pdf — используется в main.py"""
+    return generate_resume_pdf(resume_text, output_path)
+
 def create_simple_pdf(resume_text: str, output_path: str):
     """
     Упрощённая версия генерации PDF (без сложных шрифтов)
