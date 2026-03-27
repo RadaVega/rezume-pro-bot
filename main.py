@@ -40,24 +40,20 @@ def send_pdf_to_user(vk, user_id, pdf_path, vk_token):
     try:
         logger.info(f"📤 Uploading PDF: {pdf_path}")
 
-        # Check file exists
         if not os.path.exists(pdf_path):
             logger.error(f"❌ PDF not found: {pdf_path}")
             return False
 
-        # Get upload URL
         upload_server = vk.docs.getMessagesUploadServer(peer_id=user_id, type="doc")
         upload_url = upload_server["upload_url"]
         logger.info(f"📤 Upload URL received")
 
-        # Upload file
         with open(pdf_path, "rb") as f:
             files = {"file": ("Adapted_Resume.pdf", f, "application/pdf")}
             response = requests.post(upload_url, files=files)
             upload_data = response.json()
-            logger.info(f"📤 Upload response: {upload_data}")
+            logger.info(f"📤 Upload response received")
 
-        # Save document
         saved = vk.docs.save(file=upload_data["file"], title="Adapted_Resume.pdf")
         doc = saved[0] if isinstance(saved, list) else saved.get("doc", saved)
 
@@ -67,7 +63,6 @@ def send_pdf_to_user(vk, user_id, pdf_path, vk_token):
 
         logger.info(f"✅ Document saved: {attachment}")
 
-        # Send message with attachment
         vk.messages.send(
             peer_id=user_id,
             message="📄 Your adapted resume in PDF format is ready!",
@@ -85,7 +80,10 @@ def send_pdf_to_user(vk, user_id, pdf_path, vk_token):
 
 
 def adapt_resume(resume_text, vacancy_text):
+    """Fixed GigaChat adaptation with better error handling"""
     try:
+        logger.info("🔄 Initializing GigaChat model...")
+
         model = GigaChat(
             credentials=os.getenv("GIGA_CREDENTIALS"),
             scope=os.getenv("GIGA_SCOPE", "GIGACHAT_API_PERS"),
@@ -93,8 +91,10 @@ def adapt_resume(resume_text, vacancy_text):
             verify_ssl_certs=False,
         )
 
+        logger.info("✅ GigaChat model initialized")
+
         prompt = ChatPromptTemplate.from_template("""
-Adapt this resume for the vacancy. NO markdown (**, ###, ---). Clean text with emojis.
+You are an expert resume writer. Adapt this resume for the vacancy.
 
 RESUME:
 {resume}
@@ -102,34 +102,57 @@ RESUME:
 VACANCY:
 {vacancy}
 
-Format:
-📋 PROFESSIONAL PROFILE
-[text]
+Create an adapted resume with these sections:
 
-💼 WORK EXPERIENCE
-[details]
+PROFESSIONAL PROFILE
+[2-3 sentences about the candidate]
 
-🎓 EDUCATION
-[details]
+WORK EXPERIENCE
+[Job Title]
+[Company] | [Dates]
+- Achievement with metric
+- Achievement with metric
 
-🛠 SKILLS
-[details]
+EDUCATION
+[Degree, University, Year]
 
-📊 MATCH SCORE: XX%
-[explanation]
+SKILLS
+[Skills list]
 
-💡 RECOMMENDATIONS
-• [point 1]
-• [point 2]
+MATCH SCORE: XX%
+[Explanation]
+
+RECOMMENDATIONS
+- [Recommendation 1]
+- [Recommendation 2]
+
+Write in Russian. Use clear, professional language. Include specific metrics and achievements.
 """)
 
+        logger.info("🔄 Sending to GigaChat...")
+
         chain = prompt | model | StrOutputParser()
-        result = chain.invoke({"resume": resume_text, "vacancy": vacancy_text})
+        result = chain.invoke(
+            {
+                "resume": resume_text[:2000],  # Limit to avoid token limits
+                "vacancy": vacancy_text[:2000],
+            }
+        )
+
+        logger.info("✅ GigaChat adaptation complete")
+
+        if not result or len(result) < 100:
+            logger.error("❌ GigaChat returned empty or too short result")
+            return None
+
         return clean_markdown(result)
 
     except Exception as e:
         logger.error(f"❌ GigaChat error: {e}")
-        return "Error adapting resume"
+        import traceback
+
+        traceback.print_exc()
+        return None
 
 
 user_states = {}
@@ -256,38 +279,48 @@ def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN):
 
                 result = adapt_resume(user_states[user_id].resume_text, vacancy_text)
 
-                # Send text result
-                send_long_msg(vk, user_id, f"✅ Done! Your adapted resume:\n\n{result}")
-
-                # Generate and send PDF
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
-                    pdf_path = f.name
-
-                logger.info(f"📄 Generating PDF: {pdf_path}")
-
-                if create_resume_pdf(result, pdf_path):
-                    logger.info("✅ PDF created, uploading...")
-                    success = send_pdf_to_user(vk, user_id, pdf_path, VK_TOKEN)
-
-                    if not success:
-                        vk.messages.send(
-                            peer_id=user_id,
-                            message="⚠️ PDF upload failed, but text version is above!",
-                            random_id=0,
-                        )
-                else:
-                    vk.messages.send(
-                        peer_id=user_id,
-                        message="⚠️ PDF generation failed. Use text version above.",
-                        random_id=0,
+                if result:
+                    # Send text result
+                    send_long_msg(
+                        vk, user_id, f"✅ Done! Your adapted resume:\n\n{result}"
                     )
 
-                try:
-                    os.unlink(pdf_path)
-                except:
-                    pass
+                    # Generate and send PDF
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+                        pdf_path = f.name
 
-                user_states[user_id].step = "idle"
+                    logger.info(f"📄 Generating PDF: {pdf_path}")
+
+                    if create_resume_pdf(result, pdf_path):
+                        logger.info("✅ PDF created, uploading...")
+                        success = send_pdf_to_user(vk, user_id, pdf_path, VK_TOKEN)
+
+                        if not success:
+                            vk.messages.send(
+                                peer_id=user_id,
+                                message="⚠️ PDF upload failed, but text version is above!",
+                                random_id=0,
+                            )
+                    else:
+                        vk.messages.send(
+                            peer_id=user_id,
+                            message="⚠️ PDF generation failed. Use text version above.",
+                            random_id=0,
+                        )
+
+                    try:
+                        os.unlink(pdf_path)
+                    except:
+                        pass
+
+                    user_states[user_id].step = "idle"
+                else:
+                    logger.error("❌ Adaptation returned None")
+                    vk.messages.send(
+                        peer_id=user_id,
+                        message="⚠️ Error adapting resume. Please try again or contact support.",
+                        random_id=0,
+                    )
             else:
                 vk.messages.send(
                     peer_id=user_id,
@@ -319,16 +352,28 @@ def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN):
 
                 vk.messages.send(peer_id=user_id, message="🤖 Adapting...", random_id=0)
                 result = adapt_resume(resume, vacancy_text)
-                send_long_msg(vk, user_id, f"✅ Done!\n\n{result}")
-                user_states[user_id].step = "idle"
+
+                if result:
+                    send_long_msg(vk, user_id, f"✅ Done!\n\n{result}")
+                    user_states[user_id].step = "idle"
+                else:
+                    vk.messages.send(
+                        peer_id=user_id, message="⚠️ Error adapting resume", random_id=0
+                    )
 
         elif user_states[user_id].vacancy_text:
             vk.messages.send(
                 peer_id=user_id, message="🤖 Adapting... ⏱️ 30 sec", random_id=0
             )
             result = adapt_resume(resume, user_states[user_id].vacancy_text)
-            send_long_msg(vk, user_id, f"✅ Done!\n\n{result}")
-            user_states[user_id].step = "idle"
+
+            if result:
+                send_long_msg(vk, user_id, f"✅ Done!\n\n{result}")
+                user_states[user_id].step = "idle"
+            else:
+                vk.messages.send(
+                    peer_id=user_id, message="⚠️ Error adapting resume", random_id=0
+                )
 
         else:
             vk.messages.send(
