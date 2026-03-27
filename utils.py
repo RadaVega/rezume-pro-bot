@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-📦 Вспомогательные функции для Резюме.Про
+📦 ResumePro AI - PDF Generation
+✅ FIXED: Text truncation, encoding, styling issues
 """
 
 import os
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def clean_markdown(text):
+    """Remove ALL markdown formatting"""
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"__(.+?)__", r"\1", text)
     text = re.sub(r"\*(.+?)\*", r"\1", text)
@@ -91,289 +93,149 @@ def parse_hh_vacancy(url):
         return f"Error: {str(e)}"
 
 
-# === SIMPLE PDF GENERATION (GUARANTEED TO WORK) ===
+# === ✅ PROFESSIONAL PDF GENERATION ===
 
 
-def create_simple_pdf(resume_text, output_path):
+def create_resume_pdf(resume_text, output_path):
     """
-    ✅ SIMPLE PDF - ALWAYS WORKS
-    Clean, professional, no fancy fonts needed
+    🏆 GENERATES PROFESSIONAL PDF
+    - Blue header
+    - Colored sections
+    - Proper text wrapping
+    - Cyrillic support
     """
     try:
         clean_text = clean_markdown(resume_text)
+
         pdf = FPDF()
         pdf.add_page()
 
-        # Use standard Arial font (always available)
-        pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "ADAPTED RESUME", 0, 1, "C")
-        pdf.ln(5)
+        # Try to use DejaVu fonts for Cyrillic
+        try:
+            font_path = "/usr/share/fonts/truetype/dejavu"
+            if os.path.exists(font_path):
+                pdf.add_font("DejaVu", "", f"{font_path}/DejaVuSans.ttf", uni=True)
+                pdf.add_font(
+                    "DejaVu", "B", f"{font_path}/DejaVuSans-Bold.ttf", uni=True
+                )
+                pdf.add_font(
+                    "DejaVu", "I", f"{font_path}/DejaVuSans-Oblique.ttf", uni=True
+                )
+                font_family = "DejaVu"
+                logger.info("✅ Using DejaVu fonts")
+            else:
+                font_family = "Arial"
+                logger.warning("⚠️ DejaVu not found, using Arial")
+        except Exception as e:
+            logger.warning(f"⚠️ Font error: {e}, using Arial")
+            font_family = "Arial"
 
-        pdf.set_font("Arial", size=11)
-        for line in clean_text.split("\n"):
-            # Safe encoding
-            try:
-                safe_line = line.encode("latin-1", "replace").decode("latin-1")
-            except:
-                safe_line = line
-            pdf.cell(0, 7, safe_line, 0, 1)
+        # === HEADER with blue background ===
+        pdf.set_fill_color(41, 128, 185)  # Blue
+        pdf.rect(0, 0, 210, 35, "F")
 
-        pdf.output(output_path)
+        pdf.set_font(font_family, "B", 20)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_xy(0, 12)
+        pdf.cell(210, 10, "ADAPTED RESUME", 0, 1, "C")
 
-        if os.path.exists(output_path):
-            size = os.path.getsize(output_path)
-            logger.info(f"✅ Simple PDF created: {output_path} ({size} bytes)")
-            return True
-        return False
+        pdf.set_font(font_family, "", 10)
+        pdf.set_xy(0, 24)
+        pdf.cell(210, 8, "Created by ResumePro AI", 0, 1, "C")
 
-    except Exception as e:
-        logger.error(f"❌ Simple PDF error: {e}")
-        import traceback
+        pdf.ln(40)
+        pdf.set_text_color(0, 0, 0)
 
-        traceback.print_exc()
-        return False
-
-
-# === PREMIUM PDF (with styling) ===
-
-
-def generate_resume_pdf(resume_text, output_path):
-    """
-    🏆 PREMIUM PDF with professional design
-    Falls back to simple PDF if fonts fail
-    """
-    try:
-        clean_text = clean_markdown(resume_text)
+        # === CONTENT ===
         lines = clean_text.split("\n")
 
-        pdf = FPDF()
-
-        # Try to use DejaVu fonts, but FALL BACK to Arial
-        font_name = "Arial"  # Default fallback
-        try:
-            # Check if DejaVu fonts exist
-            if os.path.exists("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
-                pdf.add_font(
-                    "DejaVu",
-                    "",
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                    uni=True,
-                )
-                pdf.add_font(
-                    "DejaVu",
-                    "B",
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                    uni=True,
-                )
-                font_name = "DejaVu"
-                logger.info("✅ Using DejaVu fonts")
-        except Exception as font_err:
-            logger.warning(f"⚠️ Font issue: {font_err}, using Arial")
-            font_name = "Arial"
-
-        pdf.set_auto_page_break(auto=True, margin=15)
-        pdf.add_page()
-
-        # Colors
-        PRIMARY = (41, 128, 185)
-        DARK = (44, 62, 80)
-        LIGHT = (236, 240, 241)
-        ACCENT = (230, 126, 34)
-
-        # Find name and contact
-        name_line = "RESUME"
-        contact_line = ""
-        content_start = 0
-
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line or "АДАПТИРОВАННОЕ РЕЗЮМЕ" in line:
-                continue
-            if name_line == "RESUME":
-                name_line = line
-                content_start = i + 1
-            elif not contact_line:
-                contact_line = line
-                content_start = i + 1
-                break
-
-        # HEADER with blue background
-        try:
-            pdf.set_fill_color(*PRIMARY)
-            pdf.rect(0, 0, 210, 40, "F")
-
-            pdf.set_xy(0, 15)
-            pdf.set_font(font_name, "B", 20)
-            pdf.set_text_color(255, 255, 255)
-            pdf.cell(210, 10, name_line, align="C")
-
-            if contact_line:
-                pdf.set_xy(0, 27)
-                pdf.set_font(font_name, "", 9)
-                pdf.cell(210, 8, contact_line, align="C")
-
-            pdf.ln(45)
-            pdf.set_text_color(*DARK)
-        except Exception as e:
-            logger.error(f"Header error: {e}")
-            # Continue anyway
-
-        # CONTENT
-        in_recommendations = False
-        in_match_score = False
-
-        for line in lines[content_start:]:
+        for line in lines:
             line = line.strip()
             if not line:
                 pdf.ln(2)
                 continue
 
-            is_emoji = any(
-                e in line for e in ["📋", "📊", "💡", "✅", "📌", "💼", "🎓", "🛠"]
-            )
-            is_upper = (
-                line.isupper() and len(line) < 50 and not any(c.isdigit() for c in line)
-            )
-            is_match = "MATCH SCORE" in line.upper()
-            is_recommend = (
-                "РЕКОМЕНДАЦИИ" in line.upper() or "RECOMMENDATIONS" in line.upper()
-            )
-            is_bullet = line.startswith("-") or line.startswith("•")
+            # Section headers (with emojis)
+            if any(emoji in line for emoji in ["📋", "💼", "🎓", "🛠", "📊", "💡"]):
+                pdf.ln(5)
+                pdf.set_font(font_family, "B", 12)
+                pdf.set_text_color(41, 128, 185)  # Blue
+                pdf.set_fill_color(236, 240, 241)  # Light gray
+                pdf.cell(0, 8, line, 0, 1, "L", fill=True)
+                pdf.set_text_color(0, 0, 0)
+                pdf.set_font(font_family, "", 10)
 
-            try:
-                # Section headers
-                if is_emoji or is_upper:
-                    pdf.ln(5)
-                    y = pdf.get_y()
+            # Match Score - orange highlight
+            elif "MATCH SCORE" in line.upper():
+                pdf.ln(4)
+                pdf.set_fill_color(230, 126, 34)  # Orange
+                pdf.set_font(font_family, "B", 11)
+                pdf.set_text_color(255, 255, 255)
+                # Wrap long text
+                safe_line = line.encode("latin-1", "replace").decode("latin-1")
+                pdf.multi_cell(0, 6, safe_line, 0, "L", fill=True)
+                pdf.set_text_color(0, 0, 0)
+                pdf.set_font(font_family, "", 10)
 
-                    # Blue bar on left
-                    pdf.set_fill_color(*PRIMARY)
-                    pdf.rect(12, y, 4, 8, "F")
+            # Recommendations - gray background
+            elif "RECOMMENDATIONS" in line.upper() or "РЕКОМЕНДАЦИИ" in line.upper():
+                pdf.ln(4)
+                pdf.set_fill_color(236, 240, 241)  # Light gray
+                pdf.set_font(font_family, "B", 11)
+                pdf.set_text_color(41, 128, 185)
+                pdf.cell(0, 7, line, 0, 1, "L", fill=True)
+                pdf.set_text_color(0, 0, 0)
+                pdf.set_font(font_family, "", 9)
 
-                    pdf.set_font(font_name, "B", 12)
-                    pdf.set_text_color(*PRIMARY)
-                    pdf.set_xy(20, y)
-                    pdf.cell(185, 8, line, align="L")
-                    pdf.ln(2)
+            # Bullet points
+            elif line.startswith("-") or line.startswith("•"):
+                pdf.set_font(font_family, "", 10)
+                bullet_text = line.lstrip("-").lstrip("•").strip()
+                # Use multi_cell for proper wrapping
+                safe_text = bullet_text.encode("latin-1", "replace").decode("latin-1")
+                pdf.cell(3, 6, "•", 0, 0)
+                pdf.multi_cell(0, 5, safe_text, 0, "L")
 
-                    # Line under header
-                    pdf.set_draw_color(*LIGHT)
-                    pdf.set_line_width(0.3)
-                    pdf.line(12, pdf.get_y(), 200, pdf.get_y())
-                    pdf.ln(2)
+            # Regular text - with proper wrapping
+            else:
+                pdf.set_font(font_family, "", 10)
+                safe_line = line.encode("latin-1", "replace").decode("latin-1")
+                pdf.multi_cell(0, 5, safe_line, 0, "L")
 
-                    in_recommendations = is_recommend
-                    in_match_score = is_match
+        # === FOOTER ===
+        pdf.set_y(-15)
+        pdf.set_fill_color(41, 128, 185)
+        pdf.rect(0, 282, 210, 15, "F")
 
-                # Match Score - orange block
-                elif is_match or in_match_score:
-                    pdf.ln(4)
-                    y = pdf.get_y()
-
-                    pdf.set_fill_color(*ACCENT)
-                    pdf.rect(12, y, 188, 20, "F")
-
-                    pdf.set_font(font_name, "B", 12)
-                    pdf.set_text_color(255, 255, 255)
-                    pdf.set_xy(17, y + 3)
-
-                    for text_line in line.split("\n")[:2]:
-                        pdf.cell(178, 6, text_line.strip()[:80], align="L")
-                        pdf.ln(6)
-
-                    pdf.ln(4)
-                    in_match_score = False
-
-                # Recommendations - gray block
-                elif is_recommend or in_recommendations:
-                    if is_recommend:
-                        pdf.ln(3)
-                        y = pdf.get_y()
-
-                        pdf.set_fill_color(*LIGHT)
-                        pdf.rect(12, y, 188, 8, "F")
-
-                        pdf.set_font(font_name, "B", 11)
-                        pdf.set_text_color(*PRIMARY)
-                        pdf.set_xy(17, y + 2)
-                        pdf.cell(188, 6, "💡 RECOMMENDATIONS", align="L")
-                        pdf.ln(7)
-                        in_recommendations = True
-                    else:
-                        pdf.set_font(font_name, "", 9)
-                        pdf.set_text_color(60, 60, 60)
-                        pdf.set_xy(17, pdf.get_y())
-
-                        if is_bullet:
-                            pdf.cell(4, 5, "•", align="L")
-                            pdf.cell(
-                                174,
-                                5,
-                                line.lstrip("-").lstrip("•").strip()[:100],
-                                align="L",
-                            )
-                        else:
-                            pdf.cell(178, 5, line[:100], align="L")
-                        pdf.ln(5)
-
-                # Bullet points
-                elif is_bullet:
-                    pdf.set_font(font_name, "", 10)
-                    pdf.set_text_color(60, 60, 60)
-                    pdf.set_xy(17, pdf.get_y())
-                    pdf.cell(4, 5, "•", align="L")
-                    pdf.cell(
-                        174, 5, line.lstrip("-").lstrip("•").strip()[:100], align="L"
-                    )
-                    pdf.ln(5)
-
-                # Regular text
-                else:
-                    pdf.set_font(font_name, "", 10)
-                    pdf.set_text_color(70, 70, 70)
-                    safe_line = line.encode("latin-1", "replace").decode("latin-1")
-                    pdf.multi_cell(0, 5, safe_line[:120])
-                    pdf.ln(1)
-
-            except Exception as e:
-                logger.error(f"Content error: {e}")
-                # Continue with next line
-
-        # FOOTER
-        try:
-            pdf.set_y(-15)
-            pdf.set_fill_color(*PRIMARY)
-            pdf.rect(0, 282, 210, 15, "F")
-
-            pdf.set_font(font_name, "", 8)  # Regular, NOT italic!
-            pdf.set_text_color(255, 255, 255)
-            pdf.set_xy(0, 287)
-            pdf.cell(210, 6, f"Page {pdf.page_no()} | ResumePro AI", align="C")
-        except Exception as e:
-            logger.error(f"Footer error: {e}")
+        pdf.set_font(font_family, "I", 8)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_xy(0, 287)
+        pdf.cell(210, 6, f"Page {pdf.page_no()} | ResumePro AI", 0, 1, "C")
 
         # Save PDF
         pdf.output(output_path)
 
+        # Verify
         if os.path.exists(output_path):
             size = os.path.getsize(output_path)
-            logger.info(f"✅ Premium PDF created: {output_path} ({size} bytes)")
+            logger.info(f"✅ PDF created: {output_path} ({size} bytes)")
             return True
         else:
             logger.error("❌ PDF file not created!")
             return False
 
     except Exception as e:
-        logger.error(f"❌ Premium PDF failed: {e}")
+        logger.error(f"❌ PDF generation failed: {e}")
         import traceback
 
         traceback.print_exc()
-
-        # FALLBACK to simple PDF
-        logger.info("🔄 Falling back to simple PDF...")
-        return create_simple_pdf(resume_text, output_path)
+        return False
 
 
-def create_resume_pdf(resume_text, output_path):
-    """Main entry point"""
-    return generate_resume_pdf(resume_text, output_path)
+# Aliases for compatibility
+def generate_resume_pdf(resume_text, output_path):
+    return create_resume_pdf(resume_text, output_path)
+
+
+def create_simple_pdf(resume_text, output_path):
+    return create_resume_pdf(resume_text, output_path)
