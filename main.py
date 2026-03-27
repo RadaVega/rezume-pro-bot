@@ -190,62 +190,67 @@ def run_bot():
         for event in longpoll.listen():
             if event.type == VkBotEventType.MESSAGE_NEW:
                 user_id = event.obj.message['from_id']
-                text = event.obj.message.get('text', '').lower().strip()
-                
-                logger.info(f"📨 Сообщение от {user_id}: '{text}'")
-                
-                # === ОБРАБОТКА ВЛОЖЕНИЙ (ФАЙЛЫ) ===
+                raw_text = event.obj.message.get('text', '').strip()
+                text = raw_text.lower()
+
                 attachments = event.obj.message.get('attachments', [])
+                logger.info(f"📨 Сообщение от {user_id}: '{text}' | вложений: {len(attachments)}")
+                for a in attachments:
+                    logger.info(f"   ↳ тип вложения: {a.get('type')} | данные: {str(a)[:200]}")
+
+                # === ОБРАБОТКА ВЛОЖЕНИЙ ===
                 file_processed = False
-                
+                hh_url_from_attachment = None
+
                 for attach in attachments:
-                    if attach['type'] in ['doc', 'doc_message']:
+                    atype = attach.get('type', '')
+
+                    # --- Файл (PDF / DOCX) ---
+                    if atype == 'doc':
                         file_processed = True
                         doc = attach.get('doc', {})
                         doc_type = doc.get('ext', 'pdf').lower()
                         doc_url = doc.get('url', '')
                         doc_title = doc.get('title', 'file')
-                        
-                        logger.info(f"📎 Получен файл: {doc_title} ({doc_type})")
-                        
-                        # Скачиваем файл
+
+                        logger.info(f"📎 Получен файл: {doc_title} ({doc_type}), url={doc_url[:80]}")
+
                         if doc_url:
                             try:
-                                response = requests.get(doc_url)
+                                headers = {'User-Agent': 'Mozilla/5.0'}
+                                response = requests.get(doc_url, headers=headers, timeout=15)
+                                response.raise_for_status()
+
                                 with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{doc_type}') as f:
                                     f.write(response.content)
                                     temp_file = f.name
-                                
-                                # Извлекаем текст
+
                                 resume_text = extract_text_from_file(temp_file, doc_type)
-                                
+
+                                try:
+                                    os.unlink(temp_file)
+                                except:
+                                    pass
+
                                 if resume_text:
-                                    # Сохраняем в состояние
                                     if user_id not in user_states:
                                         user_states[user_id] = UserState()
-                                    
                                     user_states[user_id].resume_text = resume_text
                                     user_states[user_id].has_file = True
                                     user_states[user_id].step = "waiting_vacancy"
-                                    
+
                                     vk.messages.send(
                                         peer_id=user_id,
-                                        message=f"✅ Резюме загружено! ({doc_title})\n\n📎 Теперь отправь:\n• Ссылку на вакансию HH.ru\n• Или текстовое описание вакансии\n\nПример: https://hh.ru/vacancy/123456",
+                                        message=f"✅ Резюме загружено! ({doc_title})\n\n📎 Теперь отправь ссылку на вакансию HH.ru\n\nПример: https://hh.ru/vacancy/123456",
                                         random_id=0
                                     )
                                 else:
                                     vk.messages.send(
                                         peer_id=user_id,
-                                        message="⚠️ Не удалось извлечь текст из файла. Попробуй отправить другой файл или текстовое резюме.",
+                                        message="⚠️ Не удалось извлечь текст из файла. Попробуй другой файл или отправь резюме текстом.",
                                         random_id=0
                                     )
-                                
-                                # Удаляем временный файл
-                                try:
-                                    os.unlink(temp_file)
-                                except:
-                                    pass
-                                
+
                             except Exception as e:
                                 logger.error(f"❌ Ошибка обработки файла: {e}")
                                 vk.messages.send(
@@ -253,13 +258,25 @@ def run_bot():
                                     message="⚠️ Ошибка при обработке файла. Попробуй ещё раз.",
                                     random_id=0
                                 )
-                
-                # Если файл обработан — не обрабатываем текст
+
+                    # --- Ссылка (VK конвертирует URL в link-вложение) ---
+                    elif atype == 'link':
+                        link_url = attach.get('link', {}).get('url', '')
+                        logger.info(f"🔗 Вложение-ссылка: {link_url}")
+                        if 'hh.ru' in link_url:
+                            hh_url_from_attachment = link_url
+
+                # Если был файл — пропускаем обработку текста
                 if file_processed:
                     continue
-                
+
+                # Если HH.ru URL пришёл как вложение — обрабатываем его
+                if hh_url_from_attachment:
+                    text = 'hh.ru'
+                    raw_text = hh_url_from_attachment
+
                 # === ОБРАБОТКА КОМАНД ===
-                
+
                 # Команда /start
                 if text in ['/start', 'привет', 'начать', 'старт', 'хай']:
                     vk.messages.send(
@@ -350,11 +367,11 @@ def run_bot():
                     )
                 
                 # Обработка ссылок HH.ru
-                elif 'hh.ru' in text.lower():
+                elif 'hh.ru' in text:
                     logger.info(f"🔗 Получена ссылка на вакансию от {user_id}")
-                    
-                    # Извлекаем URL
-                    urls = re.findall(r'https?://[^\s]+', text)
+
+                    # Извлекаем URL из raw_text (оригинальный регистр) или из вложения
+                    urls = re.findall(r'https?://[^\s]+', raw_text)
                     
                     if urls:
                         vacancy_url = urls[0]
