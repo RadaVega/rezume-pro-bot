@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 📦 ResumePro AI - PDF Generation
-✅ FIXED: Text truncation, encoding, styling issues
+✅ FIXED: Unicode errors, emojis, text truncation
 """
 
 import os
@@ -30,6 +30,22 @@ def clean_markdown(text):
     text = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def remove_emojis(text):
+    """Remove emojis - they cause encoding errors"""
+    emoji_pattern = re.compile(
+        "["
+        "\U0001f600-\U0001f64f"  # emoticons
+        "\U0001f300-\U0001f5ff"  # symbols & pictographs
+        "\U0001f680-\U0001f6ff"  # transport & map symbols
+        "\U0001f1e0-\U0001f1ff"  # flags
+        "\U00002702-\U000027b0"
+        "\U000024c2-\U0001f251"
+        "]+",
+        flags=re.UNICODE,
+    )
+    return emoji_pattern.sub(r"", text)
 
 
 def read_pdf(file_path):
@@ -93,24 +109,25 @@ def parse_hh_vacancy(url):
         return f"Error: {str(e)}"
 
 
-# === ✅ PROFESSIONAL PDF GENERATION ===
+# === ✅ PROFESSIONAL PDF - NO EMOJIS, PROPER ENCODING ===
 
 
 def create_resume_pdf(resume_text, output_path):
     """
     🏆 GENERATES PROFESSIONAL PDF
-    - Blue header
-    - Colored sections
+    - Removes emojis (cause encoding errors)
+    - Uses DejaVu fonts for Cyrillic
     - Proper text wrapping
-    - Cyrillic support
     """
     try:
         clean_text = clean_markdown(resume_text)
+        clean_text = remove_emojis(clean_text)  # Remove emojis
 
         pdf = FPDF()
         pdf.add_page()
 
-        # Try to use DejaVu fonts for Cyrillic
+        # Use DejaVu fonts for Cyrillic support
+        font_family = "Arial"  # Default fallback
         try:
             font_path = "/usr/share/fonts/truetype/dejavu"
             if os.path.exists(font_path):
@@ -122,15 +139,13 @@ def create_resume_pdf(resume_text, output_path):
                     "DejaVu", "I", f"{font_path}/DejaVuSans-Oblique.ttf", uni=True
                 )
                 font_family = "DejaVu"
-                logger.info("✅ Using DejaVu fonts")
+                logger.info("✅ Using DejaVu fonts for Cyrillic")
             else:
-                font_family = "Arial"
-                logger.warning("⚠️ DejaVu not found, using Arial")
+                logger.warning("⚠️ DejaVu fonts not found, using Arial")
         except Exception as e:
             logger.warning(f"⚠️ Font error: {e}, using Arial")
-            font_family = "Arial"
 
-        # === HEADER with blue background ===
+        # === HEADER ===
         pdf.set_fill_color(41, 128, 185)  # Blue
         pdf.rect(0, 0, 210, 35, "F")
 
@@ -155,13 +170,30 @@ def create_resume_pdf(resume_text, output_path):
                 pdf.ln(2)
                 continue
 
-            # Section headers (with emojis)
-            if any(emoji in line for emoji in ["📋", "💼", "🎓", "🛠", "📊", "💡"]):
+            # Section headers (no emojis now)
+            if any(
+                word in line.upper()
+                for word in [
+                    "PROFILE",
+                    "EXPERIENCE",
+                    "EDUCATION",
+                    "SKILLS",
+                    "MATCH",
+                    "RECOMMENDATIONS",
+                    "ПРОФИЛЬ",
+                    "ОПЫТ",
+                    "ОБРАЗОВАНИЕ",
+                    "НАВЫКИ",
+                    "РЕКОМЕНДАЦИИ",
+                ]
+            ):
                 pdf.ln(5)
                 pdf.set_font(font_family, "B", 12)
                 pdf.set_text_color(41, 128, 185)  # Blue
                 pdf.set_fill_color(236, 240, 241)  # Light gray
-                pdf.cell(0, 8, line, 0, 1, "L", fill=True)
+                # Safe encoding
+                safe_line = line.encode("latin-1", "replace").decode("latin-1")
+                pdf.cell(0, 8, safe_line, 0, 1, "L", fill=True)
                 pdf.set_text_color(0, 0, 0)
                 pdf.set_font(font_family, "", 10)
 
@@ -171,19 +203,19 @@ def create_resume_pdf(resume_text, output_path):
                 pdf.set_fill_color(230, 126, 34)  # Orange
                 pdf.set_font(font_family, "B", 11)
                 pdf.set_text_color(255, 255, 255)
-                # Wrap long text
                 safe_line = line.encode("latin-1", "replace").decode("latin-1")
                 pdf.multi_cell(0, 6, safe_line, 0, "L", fill=True)
                 pdf.set_text_color(0, 0, 0)
                 pdf.set_font(font_family, "", 10)
 
-            # Recommendations - gray background
+            # Recommendations
             elif "RECOMMENDATIONS" in line.upper() or "РЕКОМЕНДАЦИИ" in line.upper():
                 pdf.ln(4)
                 pdf.set_fill_color(236, 240, 241)  # Light gray
                 pdf.set_font(font_family, "B", 11)
                 pdf.set_text_color(41, 128, 185)
-                pdf.cell(0, 7, line, 0, 1, "L", fill=True)
+                safe_line = line.encode("latin-1", "replace").decode("latin-1")
+                pdf.cell(0, 7, safe_line, 0, 1, "L", fill=True)
                 pdf.set_text_color(0, 0, 0)
                 pdf.set_font(font_family, "", 9)
 
@@ -191,12 +223,11 @@ def create_resume_pdf(resume_text, output_path):
             elif line.startswith("-") or line.startswith("•"):
                 pdf.set_font(font_family, "", 10)
                 bullet_text = line.lstrip("-").lstrip("•").strip()
-                # Use multi_cell for proper wrapping
                 safe_text = bullet_text.encode("latin-1", "replace").decode("latin-1")
-                pdf.cell(3, 6, "•", 0, 0)
+                pdf.cell(3, 6, "-", 0, 0)  # Use dash instead of bullet
                 pdf.multi_cell(0, 5, safe_text, 0, "L")
 
-            # Regular text - with proper wrapping
+            # Regular text with wrapping
             else:
                 pdf.set_font(font_family, "", 10)
                 safe_line = line.encode("latin-1", "replace").decode("latin-1")
@@ -215,7 +246,6 @@ def create_resume_pdf(resume_text, output_path):
         # Save PDF
         pdf.output(output_path)
 
-        # Verify
         if os.path.exists(output_path):
             size = os.path.getsize(output_path)
             logger.info(f"✅ PDF created: {output_path} ({size} bytes)")
@@ -232,7 +262,7 @@ def create_resume_pdf(resume_text, output_path):
         return False
 
 
-# Aliases for compatibility
+# Aliases
 def generate_resume_pdf(resume_text, output_path):
     return create_resume_pdf(resume_text, output_path)
 
