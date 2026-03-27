@@ -110,83 +110,80 @@ def parse_hh_vacancy(url: str) -> str:
 
 # === ГЕНЕРАЦИЯ PDF ===
 
-class ResumePDF(FPDF):
-    """Класс для генерации PDF резюме"""
-    
-    def header(self):
-        """Шапка PDF"""
-        self.set_font('DejaVu', 'B', 20)
-        self.cell(0, 10, 'АДАПТИРОВАННОЕ РЕЗЮМЕ', 0, 1, 'C')
-        self.ln(5)
-    
-    def footer(self):
-        """Подвал PDF"""
-        self.set_y(-15)
-        self.set_font('DejaVu', 'I', 8)
-        self.cell(0, 10, f'Страница {self.page_no()}', 0, 0, 'C')
-    
-    def chapter_title(self, title):
-        """Заголовок раздела"""
-        self.set_font('DejaVu', 'B', 14)
-        self.set_fill_color(200, 220, 255)
-        self.cell(0, 10, title, 0, 1, 'L', 1)
-        self.ln(3)
-    
-    def chapter_body(self, body):
-        """Текст раздела"""
-        self.set_font('DejaVu', '', 11)
-        self.multi_cell(0, 7, body)
-        self.ln(3)
+FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+FONT_BOLD    = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONTS_AVAILABLE = os.path.exists(FONT_REGULAR) and os.path.exists(FONT_BOLD)
 
 def generate_resume_pdf(resume_text: str, output_path: str):
     """
-    Генерирует PDF файл с адаптированным резюме
-    
-    Args:
-        resume_text: Текст адаптированного резюме
-        output_path: Путь для сохранения PDF
+    Генерирует PDF файл с адаптированным резюме.
+    Шрифты регистрируются ДО add_page(), чтобы header() их нашёл.
     """
     try:
-        pdf = ResumePDF()
-        pdf.add_page()
-        
-        # Добавляем шрифт DejaVu (поддерживает кириллицу)
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        if os.path.exists(font_path):
-            pdf.add_font('DejaVu', '', font_path, uni=True)
-            pdf.add_font('DejaVu', 'B', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', uni=True)
-            pdf.add_font('DejaVu', 'I', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf', uni=True)
+        pdf = FPDF()
+
+        # Регистрируем шрифты ПЕРЕД add_page()
+        if FONTS_AVAILABLE:
+            pdf.add_font('DejaVu', '', FONT_REGULAR)
+            pdf.add_font('DejaVu', 'B', FONT_BOLD)
+            font_name = 'DejaVu'
+            logger.info("✅ Шрифт DejaVu загружен")
         else:
-            # Если шрифта нет — используем стандартный (кириллица может не работать)
-            logger.warning("⚠️ Шрифт DejaVu не найден, используем стандартный")
-            pdf.set_font("Arial", size=12)
-        
-        # Разбиваем текст на секции
+            font_name = 'Helvetica'
+            logger.warning("⚠️ Шрифт DejaVu не найден, используем Helvetica")
+
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+
+        # Заголовок
+        pdf.set_font(font_name, 'B', 18)
+        pdf.set_fill_color(41, 128, 185)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(0, 12, 'АДАПТИРОВАННОЕ РЕЗЮМЕ', new_x='LMARGIN', new_y='NEXT', align='C', fill=True)
+        pdf.ln(4)
+        pdf.set_text_color(0, 0, 0)
+
+        # Текст по секциям
         sections = resume_text.split('\n\n')
-        
         for section in sections:
             section = section.strip()
             if not section:
                 continue
-            
-            # Определяем заголовок (строки с эмодзи или заглавные)
+
             lines = section.split('\n')
-            if lines:
-                first_line = lines[0].strip()
-                
-                # Если строка начинается с эмодзи или заглавная — это заголовок
-                if any(emoji in first_line for emoji in ['📋', '📊', '💡', '✅']) or first_line.isupper():
-                    pdf.chapter_title(first_line)
-                    if len(lines) > 1:
-                        pdf.chapter_body('\n'.join(lines[1:]))
-                else:
-                    pdf.chapter_body(section)
-        
-        # Сохраняем PDF
+            first_line = lines[0].strip()
+
+            # Заголовок секции — строка с эмодзи или полностью заглавная
+            is_heading = (
+                any(e in first_line for e in ['📋', '📊', '💡', '✅', '⚠️'])
+                or first_line.isupper()
+            )
+
+            if is_heading:
+                pdf.set_font(font_name, 'B', 13)
+                pdf.set_fill_color(220, 235, 255)
+                pdf.cell(0, 9, first_line, new_x='LMARGIN', new_y='NEXT', fill=True)
+                pdf.ln(1)
+                body = '\n'.join(lines[1:]).strip()
+                if body:
+                    pdf.set_font(font_name, '', 11)
+                    pdf.multi_cell(0, 6, body)
+                    pdf.ln(2)
+            else:
+                pdf.set_font(font_name, '', 11)
+                pdf.multi_cell(0, 6, section)
+                pdf.ln(2)
+
+        # Нижний колонтитул
+        pdf.set_y(-15)
+        pdf.set_font(font_name, '', 8)
+        pdf.set_text_color(128, 128, 128)
+        pdf.cell(0, 10, f'Страница {pdf.page_no()} | Резюме.Про AI', align='C')
+
         pdf.output(output_path)
         logger.info(f"✅ PDF сохранён: {output_path}")
         return True
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка генерации PDF: {e}")
         return False

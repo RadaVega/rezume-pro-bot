@@ -207,383 +207,246 @@ class UserState:
         self.has_file = False
         self.step = "idle"  # idle, waiting_vacancy, waiting_resume, processing
 
-def run_bot():
-    """Запускает VK бота (Long Poll)"""
-    try:
-        VK_TOKEN = os.getenv("VK_TOKEN")
-        GROUP_ID = int(os.getenv("GROUP_ID", 237022345))
-        
-        # Проверка токена
-        if not VK_TOKEN:
-            logger.error("❌ VK_TOKEN не найден в Secrets!")
-            return
-        
-        logger.info("🔄 Запуск бота...")
-        vk_session = vk_api.VkApi(token=VK_TOKEN)
-        vk = vk_session.get_api()
-        vk_docs = vk_api.VkApi(token=VK_TOKEN).get_api()
-        longpoll = VkBotLongPoll(vk_session, GROUP_ID)
-        
-        logger.info(f"✅ Бот запущен! Группа: {GROUP_ID}")
-        
-        # Основной цикл Long Poll
-        for event in longpoll.listen():
-            if event.type == VkBotEventType.MESSAGE_NEW:
-                user_id = event.obj.message['from_id']
-                raw_text = event.obj.message.get('text', '').strip()
-                text = raw_text.lower()
+def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN):
+    """Обрабатывает одно входящее сообщение."""
+    text = raw_text.lower()
 
-                attachments = event.obj.message.get('attachments', [])
-                logger.info(f"📨 Сообщение от {user_id}: '{text}' | вложений: {len(attachments)}")
-                for a in attachments:
-                    logger.info(f"   ↳ тип вложения: {a.get('type')} | данные: {str(a)[:200]}")
+    logger.info(f"📨 Сообщение от {user_id}: '{text}' | вложений: {len(attachments)}")
+    for a in attachments:
+        logger.info(f"   ↳ тип вложения: {a.get('type')} | данные: {str(a)[:200]}")
 
-                # === ОБРАБОТКА ВЛОЖЕНИЙ ===
-                file_processed = False
-                hh_url_from_attachment = None
+    # === ОБРАБОТКА ВЛОЖЕНИЙ ===
+    file_processed = False
+    hh_url_from_attachment = None
 
-                for attach in attachments:
-                    atype = attach.get('type', '')
+    for attach in attachments:
+        atype = attach.get('type', '')
 
-                    # --- Файл (PDF / DOCX) ---
-                    if atype == 'doc':
-                        file_processed = True
-                        doc = attach.get('doc', {})
-                        doc_type = doc.get('ext', 'pdf').lower()
-                        doc_url = doc.get('url', '')
-                        doc_title = doc.get('title', 'file')
+        # --- Файл (PDF / DOCX) ---
+        if atype == 'doc':
+            file_processed = True
+            doc = attach.get('doc', {})
+            doc_type = doc.get('ext', 'pdf').lower()
+            doc_url = doc.get('url', '')
+            doc_title = doc.get('title', 'file')
 
-                        logger.info(f"📎 Получен файл: {doc_title} ({doc_type}), url={doc_url[:80]}")
+            logger.info(f"📎 Получен файл: {doc_title} ({doc_type}), url={doc_url[:80]}")
 
-                        if doc_url:
-                            try:
-                                headers = {'User-Agent': 'Mozilla/5.0'}
-                                response = requests.get(doc_url, headers=headers, timeout=15)
-                                response.raise_for_status()
+            if doc_url:
+                try:
+                    headers = {'User-Agent': 'Mozilla/5.0'}
+                    response = requests.get(doc_url, headers=headers, timeout=15)
+                    response.raise_for_status()
 
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{doc_type}') as f:
-                                    f.write(response.content)
-                                    temp_file = f.name
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{doc_type}') as f:
+                        f.write(response.content)
+                        temp_file = f.name
 
-                                resume_text = extract_text_from_file(temp_file, doc_type)
+                    resume_text = extract_text_from_file(temp_file, doc_type)
 
-                                try:
-                                    os.unlink(temp_file)
-                                except:
-                                    pass
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
 
-                                if resume_text:
-                                    if user_id not in user_states:
-                                        user_states[user_id] = UserState()
-                                    user_states[user_id].resume_text = resume_text
-                                    user_states[user_id].has_file = True
-                                    user_states[user_id].step = "waiting_vacancy"
-
-                                    vk.messages.send(
-                                        peer_id=user_id,
-                                        message=f"✅ Резюме загружено! ({doc_title})\n\n📎 Теперь отправь ссылку на вакансию HH.ru\n\nПример: https://hh.ru/vacancy/123456",
-                                        random_id=0
-                                    )
-                                else:
-                                    vk.messages.send(
-                                        peer_id=user_id,
-                                        message="⚠️ Не удалось извлечь текст из файла. Попробуй другой файл или отправь резюме текстом.",
-                                        random_id=0
-                                    )
-
-                            except Exception as e:
-                                logger.error(f"❌ Ошибка обработки файла: {e}")
-                                vk.messages.send(
-                                    peer_id=user_id,
-                                    message="⚠️ Ошибка при обработке файла. Попробуй ещё раз.",
-                                    random_id=0
-                                )
-
-                    # --- Ссылка (VK конвертирует URL в link-вложение) ---
-                    elif atype == 'link':
-                        link_url = attach.get('link', {}).get('url', '')
-                        logger.info(f"🔗 Вложение-ссылка: {link_url}")
-                        if 'hh.ru' in link_url:
-                            hh_url_from_attachment = link_url
-
-                # Если был файл — пропускаем обработку текста
-                if file_processed:
-                    continue
-
-                # Если HH.ru URL пришёл как вложение — обрабатываем его
-                if hh_url_from_attachment:
-                    text = 'hh.ru'
-                    raw_text = hh_url_from_attachment
-
-                # === ОБРАБОТКА КОМАНД ===
-
-                # Команда /start
-                if text in ['/start', 'привет', 'начать', 'старт', 'хай']:
-                    vk.messages.send(
-                        peer_id=user_id,
-                        message="""👋 Привет! Я бот Резюме.Про 🎯
-
-Я помогу адаптировать твоё резюме под вакансию за 30 секунд с помощью ИИ.
-
-📋 Как работать:
-1. Отправь резюме (текстом или файлом PDF/DOCX)
-2. Отправь ссылку на вакансию HH.ru
-3. Получи адаптированную версию + Match Score
-
-💡 Команды:
-• /help — справка
-• /demo — показать пример
-• /adapt — адаптировать резюме
-
-Проект Школы 21 • Готов помочь! 🚀""",
-                        random_id=0
-                    )
-                    logger.info(f"✅ Отправлено приветствие")
-                
-                # Команда /help
-                elif text in ['/help', 'помощь', 'справка', 'хелп', '?']:
-                    vk.messages.send(
-                        peer_id=user_id,
-                        message="""💡 Команды бота:
-
-/start — начать работу
-/help — показать эту справку  
-/demo — показать пример работы
-/adapt — адаптировать резюме под вакансию
-
-📝 Как использовать:
-1. Отправь резюме (текстом или файлом PDF/DOCX)
-2. Отправь ссылку на вакансию HH.ru
-3. Получи адаптированное резюме с Match Score!
-
-📄 Поддерживаемые форматы: PDF, DOCX""",
-                        random_id=0
-                    )
-                    logger.info(f"✅ Отправлена справка")
-                
-                # Команда /demo
-                elif text in ['/demo', 'демо', 'пример', 'тест']:
-                    vk.messages.send(
-                        peer_id=user_id,
-                        message="""🎯 Пример работы:
-
-Вакансия: "Требуется Product Manager с опытом в Agile, знанием SQL"
-
-📄 Было в резюме:
-"Управлял проектами, работал с данными"
-
-✨ Стало после адаптации:
-"Управлял проектами по методологии Agile. Проводил анализ данных с помощью SQL для принятия продуктовых решений"
-
-📊 Match Score: 87% ✅
-
-Готов попробовать? Отправь /adapt! 🚀""",
-                        random_id=0
-                    )
-                    logger.info(f"✅ Отправлено демо")
-                
-                # Команда /adapt
-                elif text.startswith('/adapt') or 'адаптируй' in text or 'адаптировать' in text:
-                    logger.info(f"🔄 Запрос на адаптацию от {user_id}")
-                    
-                    vk.messages.send(
-                        peer_id=user_id,
-                        message="""📝 Отправь данные для адаптации:
-
-1️⃣ РЕЗЮМЕ:
-   • Текстом в сообщении
-   • Или файлом PDF/DOCX
-
-2️⃣ ВАКАНСИЯ:
-   • Ссылка на HH.ru
-   • Или текстовое описание
-
-Пример:
-«Резюме: Менеджер проектов, 2 года опыта
-Вакансия: https://hh.ru/vacancy/123456»
-
-Я адаптирую резюме за ~30 секунд! 🤖✨""",
-                        random_id=0
-                    )
-                
-                # Обработка ссылок HH.ru
-                elif 'hh.ru' in text:
-                    logger.info(f"🔗 Получена ссылка на вакансию от {user_id}")
-
-                    # Извлекаем URL из raw_text (оригинальный регистр) или из вложения
-                    urls = re.findall(r'https?://[^\s]+', raw_text)
-                    
-                    if urls:
-                        vacancy_url = urls[0]
-                        
-                        # Парсим вакансию
-                        vk.messages.send(
-                            peer_id=user_id,
-                            message="⏳ Парсю вакансию с HH.ru... Подожди ~10 секунд",
-                            random_id=0
-                        )
-                        
-                        vacancy_text = parse_hh_vacancy(vacancy_url)
-                        
-                        # Сохраняем состояние
+                    if resume_text:
                         if user_id not in user_states:
                             user_states[user_id] = UserState()
-                        
-                        user_states[user_id].vacancy_text = vacancy_text
-                        user_states[user_id].vacancy_url = vacancy_url
-                        
-                        # Если уже есть резюме — адаптируем
-                        if user_states[user_id].resume_text:
-                            vk.messages.send(
-                                peer_id=user_id,
-                                message="🤖 Отлично! У меня есть резюме и вакансия. Начинаю адаптацию... ⏱️ ~30 секунд",
-                                random_id=0
-                            )
-                            
-                            # Адаптируем через GigaChat
-                            result = adapt_resume_with_gigachat(
-                                user_states[user_id].resume_text,
-                                vacancy_text
-                            )
-                            
-                            # Сначала отправляем текстовый результат
-                            vk.messages.send(
-                                peer_id=user_id,
-                                message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result,
-                                random_id=0
-                            )
-
-                            # Генерируем и отправляем PDF
-                            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as f:
-                                pdf_path = f.name
-
-                            if create_resume_pdf(result, pdf_path):
-                                sent = send_pdf_to_user(vk, user_id, pdf_path, VK_TOKEN)
-                                if not sent:
-                                    vk.messages.send(
-                                        peer_id=user_id,
-                                        message="⚠️ PDF создан, но не удалось отправить файл. Сохрани текст выше.",
-                                        random_id=0
-                                    )
-                            else:
-                                vk.messages.send(
-                                    peer_id=user_id,
-                                    message="⚠️ Не удалось сгенерировать PDF. Используй текст выше.",
-                                    random_id=0
-                                )
-
-                            try:
-                                os.unlink(pdf_path)
-                            except:
-                                pass
-
-                            user_states[user_id].step = "idle"
-                            
-                        else:
-                            vk.messages.send(
-                                peer_id=user_id,
-                                message="✅ Вакансия сохранена!\n\n📝 Теперь отправь резюме:\n• Текстом в сообщении\n• Или файлом PDF/DOCX",
-                                random_id=0
-                            )
-                
-                # Обработка текста резюме
-                elif 'резюме:' in text.lower():
-                    logger.info(f"📄 Получено резюме от {user_id}")
-                    
-                    # Извлекаем текст резюме
-                    parts = text.lower().split('ваканс')
-                    if len(parts) < 2:
-                        parts = text.lower().split('вакансия')
-                    
-                    resume = parts[0].replace('резюме:', '').strip()
-                    vacancy_part = parts[1] if len(parts) > 1 else ""
-                    
-                    # Сохраняем состояние
-                    if user_id not in user_states:
-                        user_states[user_id] = UserState()
-                    
-                    user_states[user_id].resume_text = resume
-                    
-                    # Если в том же сообщении есть вакансия
-                    if vacancy_part and 'hh.ru' in vacancy_part:
-                        urls = re.findall(r'https?://[^\s]+', vacancy_part)
-                        if urls:
-                            vacancy_url = urls[0]
-                            vk.messages.send(
-                                peer_id=user_id,
-                                message="⏳ Парсю вакансию с HH.ru... Подожди ~10 секунд",
-                                random_id=0
-                            )
-                            vacancy_text = parse_hh_vacancy(vacancy_url)
-                            user_states[user_id].vacancy_text = vacancy_text
-                            
-                            # Адаптируем
-                            vk.messages.send(
-                                peer_id=user_id,
-                                message="🤖 Адаптирую резюме... ⏱️ ~30 секунд",
-                                random_id=0
-                            )
-                            
-                            result = adapt_resume_with_gigachat(resume, vacancy_text)
-                            vk.messages.send(
-                                peer_id=user_id,
-                                message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result,
-                                random_id=0
-                            )
-                            user_states[user_id].step = "idle"
-                    elif user_states[user_id].vacancy_text:
-                        # Если вакансия уже была
+                        user_states[user_id].resume_text = resume_text
+                        user_states[user_id].has_file = True
+                        user_states[user_id].step = "waiting_vacancy"
                         vk.messages.send(
                             peer_id=user_id,
-                            message="🤖 Адаптирую резюме... ⏱️ ~30 секунд",
+                            message=f"✅ Резюме загружено! ({doc_title})\n\n📎 Теперь отправь ссылку на вакансию HH.ru\n\nПример: https://hh.ru/vacancy/123456",
                             random_id=0
                         )
-                        
-                        result = adapt_resume_with_gigachat(
-                            user_states[user_id].resume_text,
-                            user_states[user_id].vacancy_text
-                        )
-                        
-                        vk.messages.send(
-                            peer_id=user_id,
-                            message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result,
-                            random_id=0
-                        )
-                        
-                        user_states[user_id].step = "idle"
                     else:
                         vk.messages.send(
                             peer_id=user_id,
-                            message="✅ Резюме сохранено!\n\n🔗 Теперь отправь ссылку на вакансию HH.ru",
+                            message="⚠️ Не удалось извлечь текст из файла. Попробуй другой файл или отправь резюме текстом.",
                             random_id=0
                         )
-                
-                # Ответ на любое другое сообщение
-                else:
+                except Exception as e:
+                    logger.error(f"❌ Ошибка обработки файла: {e}")
                     vk.messages.send(
                         peer_id=user_id,
-                        message="""👋 Привет! 
-
-Чтобы начать, используй команду:
-• /start — начать работу
-• /demo — увидеть пример
-• /help — справка
-• /adapt — адаптировать резюме
-
-Или просто напиши "привет" 😊""",
+                        message="⚠️ Ошибка при обработке файла. Попробуй ещё раз.",
                         random_id=0
                     )
-                    
-    except vk_api.exceptions.ApiError as e:
-        logger.error(f"❌ VK API ошибка [{e.code}]: {e}")
-        if e.code == 5:
-            logger.error("💡 Токен невалиден — создай новый в настройках группы!")
-        elif e.code == 15:
-            logger.error("💡 Не хватает прав — добавь 'Сообщения сообщества' при создании токена!")
-    except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+
+        # --- Ссылка (VK конвертирует URL в link-вложение) ---
+        elif atype == 'link':
+            link_url = attach.get('link', {}).get('url', '')
+            logger.info(f"🔗 Вложение-ссылка: {link_url}")
+            if 'hh.ru' in link_url:
+                hh_url_from_attachment = link_url
+
+    if file_processed:
+        return
+
+    # Если HH.ru URL пришёл как вложение — подставляем
+    if hh_url_from_attachment:
+        text = 'hh.ru'
+        raw_text = hh_url_from_attachment
+
+    # === ОБРАБОТКА КОМАНД ===
+
+    if text in ['/start', 'привет', 'начать', 'старт', 'хай']:
+        vk.messages.send(
+            peer_id=user_id,
+            message="👋 Привет! Я бот Резюме.Про 🎯\n\nЯ помогу адаптировать твоё резюме под вакансию за 30 секунд с помощью ИИ.\n\n📋 Как работать:\n1. Отправь резюме (текстом или файлом PDF/DOCX)\n2. Отправь ссылку на вакансию HH.ru\n3. Получи адаптированную версию + Match Score\n\n💡 Команды:\n• /help — справка\n• /demo — показать пример\n• /adapt — адаптировать резюме\n\nПроект Школы 21 • Готов помочь! 🚀",
+            random_id=0
+        )
+        logger.info("✅ Отправлено приветствие")
+
+    elif text in ['/help', 'помощь', 'справка', 'хелп', '?']:
+        vk.messages.send(
+            peer_id=user_id,
+            message="💡 Команды бота:\n\n/start — начать работу\n/help — показать эту справку\n/demo — показать пример работы\n/adapt — адаптировать резюме\n\n📝 Как использовать:\n1. Отправь резюме (текстом или файлом PDF/DOCX)\n2. Отправь ссылку на вакансию HH.ru\n3. Получи адаптированное резюме с Match Score!\n\n📄 Поддерживаемые форматы: PDF, DOCX",
+            random_id=0
+        )
+        logger.info("✅ Отправлена справка")
+
+    elif text in ['/demo', 'демо', 'пример', 'тест']:
+        vk.messages.send(
+            peer_id=user_id,
+            message="🎯 Пример работы:\n\nВакансия: \"Требуется Product Manager с опытом в Agile, знанием SQL\"\n\n📄 Было в резюме:\n\"Управлял проектами, работал с данными\"\n\n✨ Стало после адаптации:\n\"Управлял проектами по методологии Agile. Проводил анализ данных с помощью SQL для принятия продуктовых решений\"\n\n📊 Match Score: 87% ✅\n\nГотов попробовать? Отправь /adapt! 🚀",
+            random_id=0
+        )
+        logger.info("✅ Отправлено демо")
+
+    elif text.startswith('/adapt') or 'адаптируй' in text or 'адаптировать' in text:
+        logger.info(f"🔄 Запрос на адаптацию от {user_id}")
+        vk.messages.send(
+            peer_id=user_id,
+            message="📝 Отправь данные для адаптации:\n\n1️⃣ РЕЗЮМЕ:\n   • Текстом в сообщении\n   • Или файлом PDF/DOCX\n\n2️⃣ ВАКАНСИЯ:\n   • Ссылка на HH.ru\n\nЯ адаптирую резюме за ~30 секунд! 🤖✨",
+            random_id=0
+        )
+
+    elif 'hh.ru' in text:
+        logger.info(f"🔗 Получена ссылка на вакансию от {user_id}")
+        urls = re.findall(r'https?://[^\s]+', raw_text)
+
+        if urls:
+            vacancy_url = urls[0]
+            vk.messages.send(peer_id=user_id, message="⏳ Загружаю вакансию с HH.ru...", random_id=0)
+            vacancy_text = parse_hh_vacancy(vacancy_url)
+
+            if user_id not in user_states:
+                user_states[user_id] = UserState()
+            user_states[user_id].vacancy_text = vacancy_text
+            user_states[user_id].vacancy_url = vacancy_url
+
+            if user_states[user_id].resume_text:
+                vk.messages.send(peer_id=user_id, message="🤖 Начинаю адаптацию... ⏱️ ~30 секунд", random_id=0)
+                result = adapt_resume_with_gigachat(user_states[user_id].resume_text, vacancy_text)
+
+                vk.messages.send(
+                    peer_id=user_id,
+                    message="✅ Готово! Вот твоё адаптированное резюме:\n\n" + result,
+                    random_id=0
+                )
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as f:
+                    pdf_path = f.name
+                if create_resume_pdf(result, pdf_path):
+                    sent = send_pdf_to_user(vk, user_id, pdf_path, VK_TOKEN)
+                    if not sent:
+                        vk.messages.send(peer_id=user_id, message="⚠️ Не удалось отправить PDF-файл.", random_id=0)
+                else:
+                    vk.messages.send(peer_id=user_id, message="⚠️ Не удалось сгенерировать PDF. Используй текст выше.", random_id=0)
+                try:
+                    os.unlink(pdf_path)
+                except:
+                    pass
+                user_states[user_id].step = "idle"
+            else:
+                vk.messages.send(
+                    peer_id=user_id,
+                    message="✅ Вакансия сохранена!\n\n📝 Теперь отправь резюме:\n• Текстом в сообщении\n• Или файлом PDF/DOCX",
+                    random_id=0
+                )
+
+    elif 'резюме:' in text:
+        logger.info(f"📄 Получено резюме от {user_id}")
+        parts = text.split('ваканс')
+        resume = parts[0].replace('резюме:', '').strip()
+        vacancy_part = parts[1] if len(parts) > 1 else ""
+
+        if user_id not in user_states:
+            user_states[user_id] = UserState()
+        user_states[user_id].resume_text = resume
+
+        if vacancy_part and 'hh.ru' in vacancy_part:
+            urls = re.findall(r'https?://[^\s]+', vacancy_part)
+            if urls:
+                vk.messages.send(peer_id=user_id, message="⏳ Загружаю вакансию с HH.ru...", random_id=0)
+                vacancy_text = parse_hh_vacancy(urls[0])
+                user_states[user_id].vacancy_text = vacancy_text
+                vk.messages.send(peer_id=user_id, message="🤖 Адаптирую резюме... ⏱️ ~30 секунд", random_id=0)
+                result = adapt_resume_with_gigachat(resume, vacancy_text)
+                vk.messages.send(peer_id=user_id, message="✅ Готово!\n\n" + result, random_id=0)
+                user_states[user_id].step = "idle"
+        elif user_states[user_id].vacancy_text:
+            vk.messages.send(peer_id=user_id, message="🤖 Адаптирую резюме... ⏱️ ~30 секунд", random_id=0)
+            result = adapt_resume_with_gigachat(resume, user_states[user_id].vacancy_text)
+            vk.messages.send(peer_id=user_id, message="✅ Готово!\n\n" + result, random_id=0)
+            user_states[user_id].step = "idle"
+        else:
+            vk.messages.send(
+                peer_id=user_id,
+                message="✅ Резюме сохранено!\n\n🔗 Теперь отправь ссылку на вакансию HH.ru",
+                random_id=0
+            )
+
+    else:
+        vk.messages.send(
+            peer_id=user_id,
+            message="👋 Привет!\n\nЧтобы начать:\n• /start — начать работу\n• /demo — увидеть пример\n• /help — справка\n• /adapt — адаптировать резюме\n\nИли просто напиши «привет» 😊",
+            random_id=0
+        )
+
+
+def run_bot():
+    """Запускает VK бота (Long Poll) с автоматическим переподключением."""
+    VK_TOKEN = os.getenv("VK_TOKEN")
+    GROUP_ID = int(os.getenv("GROUP_ID", 237022345))
+
+    if not VK_TOKEN:
+        logger.error("❌ VK_TOKEN не найден в Secrets!")
+        return
+
+    vk_session = vk_api.VkApi(token=VK_TOKEN)
+    vk = vk_session.get_api()
+
+    while True:
+        try:
+            logger.info("🔄 Подключение к VK LongPoll...")
+            longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+            logger.info(f"✅ Бот запущен! Группа: {GROUP_ID}")
+
+            for event in longpoll.listen():
+                if event.type != VkBotEventType.MESSAGE_NEW:
+                    continue
+                try:
+                    user_id = event.obj.message['from_id']
+                    raw_text = event.obj.message.get('text', '').strip()
+                    attachments = event.obj.message.get('attachments', [])
+                    handle_message(vk, user_id, raw_text, attachments, VK_TOKEN)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка обработки сообщения: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        except vk_api.exceptions.ApiError as e:
+            logger.error(f"❌ VK API ошибка [{e.code}]: {e}")
+            if e.code == 5:
+                logger.error("💡 Токен невалиден — создай новый в настройках группы!")
+                break
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"❌ Ошибка соединения с VK: {e}. Переподключение через 5 сек...")
+            time.sleep(5)
 
 if __name__ == "__main__":
     # Запускаем Flask в отдельном потоке
