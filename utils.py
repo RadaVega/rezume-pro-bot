@@ -56,73 +56,57 @@ def extract_text_from_file(file_path: str, file_type: str) -> str:
 
 # === ПАРСИНГ HH.RU ===
 
-def parse_hh_vacancy(url: str) -> dict:
+def parse_hh_vacancy(url: str) -> str:
     """
-    Парсит вакансию с HH.ru
-    Возвращает: название, компания, описание, требования
+    Получает вакансию с HH.ru через официальный публичный API.
+    Поддерживает ссылки вида: https://hh.ru/vacancy/12345678
     """
     try:
+        import re as _re
+        match = _re.search(r'hh\.ru/vacancy/(\d+)', url)
+        if not match:
+            return "Не удалось извлечь ID вакансии из ссылки. Убедись, что ссылка вида https://hh.ru/vacancy/12345678"
+
+        vacancy_id = match.group(1)
+        api_url = f"https://api.hh.ru/vacancies/{vacancy_id}"
+
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'ResumePro-Bot/1.0 (rubyalbe@school21.ru)'
         }
-        
-        response = requests.get(url, headers=headers, timeout=10)
+
+        response = requests.get(api_url, headers=headers, timeout=10)
         response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Извлекаем данные
-        vacancy_data = {
-            'title': '',
-            'company': '',
-            'description': '',
-            'requirements': '',
-            'full_text': ''
-        }
-        
-        # Заголовок вакансии
-        title_tag = soup.find('h1', {'data-qa': 'vacancy-title'})
-        if title_tag:
-            vacancy_data['title'] = title_tag.text.strip()
-        
-        # Компания
-        company_tag = soup.find('a', {'data-qa': 'vacancy-company-name'})
-        if company_tag:
-            vacancy_data['company'] = company_tag.text.strip()
-        
-        # Описание и требования
-        description_div = soup.find('div', {'data-qa': 'vacancy-description'})
-        if description_div:
-            vacancy_data['description'] = description_div.get_text('\n', strip=True)
-        
-        # Полный текст (если не нашли по data-qa)
-        if not vacancy_data['description']:
-            # Пробуем найти по классам
-            main_content = soup.find('div', class_='vacancy-description')
-            if main_content:
-                vacancy_data['full_text'] = main_content.get_text('\n', strip=True)
-            else:
-                # Если совсем ничего не нашли — берём весь текст страницы
-                vacancy_data['full_text'] = soup.get_text('\n', strip=True)[:3000]
-        
-        # Формируем итоговый текст
-        vacancy_text = f"""
-НАЗВАНИЕ ВАКАНСИИ: {vacancy_data['title']}
-КОМПАНИЯ: {vacancy_data['company']}
+        data = response.json()
+
+        title = data.get('name', '')
+        company = data.get('employer', {}).get('name', '')
+
+        # Описание приходит в HTML — очищаем теги
+        description_html = data.get('description', '')
+        description = BeautifulSoup(description_html, 'html.parser').get_text('\n', strip=True)
+
+        # Ключевые навыки
+        skills = ', '.join(s.get('name', '') for s in data.get('key_skills', []))
+
+        # Опыт и занятость
+        experience = data.get('experience', {}).get('name', '')
+        employment = data.get('employment', {}).get('name', '')
+
+        vacancy_text = f"""НАЗВАНИЕ ВАКАНСИИ: {title}
+КОМПАНИЯ: {company}
+ОПЫТ: {experience}
+ЗАНЯТОСТЬ: {employment}
+КЛЮЧЕВЫЕ НАВЫКИ: {skills}
 
 ОПИСАНИЕ:
-{vacancy_data['description'] or vacancy_data['full_text']}
+{description}""".strip()
 
-ТРЕБОВАНИЯ:
-{vacancy_data['requirements']}
-""".strip()
-        
-        logger.info(f"✅ Спарсено вакансию: {vacancy_data['title']}")
+        logger.info(f"✅ Получена вакансия через API: {title} ({company})")
         return vacancy_text
-        
+
     except Exception as e:
-        logger.error(f"❌ Ошибка парсинга HH.ru: {e}")
-        return f"Ошибка при парсинге вакансии: {str(e)}"
+        logger.error(f"❌ Ошибка получения вакансии с HH.ru: {e}")
+        return f"Ошибка при получении вакансии: {str(e)}"
 
 # === ГЕНЕРАЦИЯ PDF ===
 
