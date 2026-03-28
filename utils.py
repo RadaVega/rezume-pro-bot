@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 📦 ResumePro AI - Utilities
-✅ FIXED: Dictionary-based Cyrillic transliteration (no maketrans length issue)
-✅ Cyrillic-safe PDF generation
+✅ FINAL FIX: Aggressive Cyrillic removal + simple PDF
 """
 
 import os
@@ -15,6 +14,7 @@ from docx import Document
 from fpdf import FPDF
 import tempfile
 import logging
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 def clean_markdown(text):
-    """Remove ALL markdown formatting"""
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"__(.+?)__", r"\1", text)
     text = re.sub(r"\*(.+?)\*", r"\1", text)
@@ -36,7 +35,6 @@ def clean_markdown(text):
 
 
 def remove_emojis(text):
-    """Remove emojis - cause PDF encoding errors"""
     emoji_pattern = re.compile(
         "["
         "\U0001f600-\U0001f64f"
@@ -51,6 +49,111 @@ def remove_emojis(text):
     return emoji_pattern.sub(r"", text)
 
 
+# === AGGRESSIVE CYRILLIC REMOVAL ===
+
+
+def to_ascii_safe(text):
+    """
+    Convert ANY text to ASCII-safe Latin characters only.
+    Removes/transliterates Cyrillic, emojis, special chars.
+    """
+    # Step 1: Normalize Unicode
+    text = unicodedata.normalize("NFKD", text)
+
+    # Step 2: Remove diacritics (accents)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+
+    # Step 3: Manual Cyrillic mapping (dictionary-based)
+    cyr_map = {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "c",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "sh",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "u",
+        "я": "ya",
+        "А": "A",
+        "Б": "B",
+        "В": "V",
+        "Г": "G",
+        "Д": "D",
+        "Е": "E",
+        "Ё": "E",
+        "Ж": "Zh",
+        "З": "Z",
+        "И": "I",
+        "Й": "Y",
+        "К": "K",
+        "Л": "L",
+        "М": "M",
+        "Н": "N",
+        "О": "O",
+        "П": "P",
+        "Р": "R",
+        "С": "S",
+        "Т": "T",
+        "У": "U",
+        "Ф": "F",
+        "Х": "H",
+        "Ц": "C",
+        "Ч": "Ch",
+        "Ш": "Sh",
+        "Щ": "Sh",
+        "Ъ": "",
+        "Ы": "Y",
+        "Ь": "",
+        "Э": "E",
+        "Ю": "U",
+        "Я": "Ya",
+    }
+
+    result = []
+    for char in text:
+        # Try dictionary mapping first
+        if char in cyr_map:
+            result.append(cyr_map[char])
+        # Keep ASCII letters, digits, basic punctuation
+        elif ord(char) < 128 and (
+            char.isalnum() or char in " .,;:!?-()[]/\\@#%&*+=<>|_"
+        ):
+            result.append(char)
+        # Skip everything else (Cyrillic, emojis, etc.)
+        else:
+            result.append(" ")
+
+    # Step 4: Clean up extra spaces
+    text = "".join(result)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
 # === FILE READING ===
 
 
@@ -62,7 +165,7 @@ def read_pdf(file_path):
             extracted = page.extract_text()
             if extracted:
                 text += extracted + "\n"
-        return text.strip()
+        return to_ascii_safe(text.strip())
     except Exception as e:
         logger.error(f"PDF read error: {e}")
         return ""
@@ -75,7 +178,7 @@ def read_docx(file_path):
         for paragraph in doc.paragraphs:
             if paragraph.text.strip():
                 text += paragraph.text + "\n"
-        return text.strip()
+        return to_ascii_safe(text.strip())
     except Exception as e:
         logger.error(f"DOCX read error: {e}")
         return ""
@@ -89,7 +192,7 @@ def extract_text_from_file(file_path, file_type):
     return ""
 
 
-# === HH.RU PARSING ===
+# === HH.RU PARSING (ASCII-Only Output) ===
 
 
 def parse_hh_vacancy(url):
@@ -107,133 +210,49 @@ def parse_hh_vacancy(url):
         company = data.get("employer", {}).get("name", "")
         description_html = data.get("description", "")
         description = BeautifulSoup(description_html, "html.parser").get_text(
-            "\n", strip=True
+            " ", strip=True
         )
         skills = ", ".join(s.get("name", "") for s in data.get("key_skills", []))
         experience = data.get("experience", {}).get("name", "")
         employment = data.get("employment", {}).get("name", "")
-        return f"VACANCY: {title}\nCOMPANY: {company}\nEXPERIENCE: {experience}\nEMPLOYMENT: {employment}\nSKILLS: {skills}\n\nDESCRIPTION:\n{description}"
+
+        # Return ASCII-safe text
+        return to_ascii_safe(
+            f"VACANCY: {title}\nCOMPANY: {company}\nEXPERIENCE: {experience}\nEMPLOYMENT: {employment}\nSKILLS: {skills}\n\nDESCRIPTION:\n{description}"
+        )
     except Exception as e:
         logger.error(f"HH.ru error: {e}")
         return f"Error: {str(e)}"
 
 
-# === CYRILLIC TRANSLITERATION (DICTIONARY-BASED) ===
-
-CYR_DICT = {
-    "а": "a",
-    "б": "b",
-    "в": "v",
-    "г": "g",
-    "д": "d",
-    "е": "e",
-    "ё": "yo",
-    "ж": "zh",
-    "з": "z",
-    "и": "i",
-    "й": "y",
-    "к": "k",
-    "л": "l",
-    "м": "m",
-    "н": "n",
-    "о": "o",
-    "п": "p",
-    "р": "r",
-    "с": "s",
-    "т": "t",
-    "у": "u",
-    "ф": "f",
-    "х": "kh",
-    "ц": "ts",
-    "ч": "ch",
-    "ш": "sh",
-    "щ": "shch",
-    "ъ": "",
-    "ы": "y",
-    "ь": "",
-    "э": "e",
-    "ю": "yu",
-    "я": "ya",
-    "А": "A",
-    "Б": "B",
-    "В": "V",
-    "Г": "G",
-    "Д": "D",
-    "Е": "E",
-    "Ё": "Yo",
-    "Ж": "Zh",
-    "З": "Z",
-    "И": "I",
-    "Й": "Y",
-    "К": "K",
-    "Л": "L",
-    "М": "M",
-    "Н": "N",
-    "О": "O",
-    "П": "P",
-    "Р": "R",
-    "С": "S",
-    "Т": "T",
-    "У": "U",
-    "Ф": "F",
-    "Х": "Kh",
-    "Ц": "Ts",
-    "Ч": "Ch",
-    "Ш": "Sh",
-    "Щ": "Shch",
-    "Ъ": "",
-    "Ы": "Y",
-    "Ь": "",
-    "Э": "E",
-    "Ю": "Yu",
-    "Я": "Ya",
-}
-
-
-def transliterate(text):
-    """Convert Cyrillic to Latin using dictionary (supports multi-char mappings)"""
-    result = []
-    for char in text:
-        result.append(CYR_DICT.get(char, char))
-    return "".join(result)
-
-
-# === PDF GENERATION (CYRILLIC-SAFE) ===
+# === SIMPLE, BULLETPROOF PDF GENERATION ===
 
 
 def create_resume_pdf(resume_text, output_path):
     """
-    ✅ CYRILLIC-SAFE PDF GENERATION
-    - Dictionary-based transliteration (no maketrans length issue)
-    - Uses standard Helvetica font (always available)
-    - Professional styling with colors
+    ✅ BULLETPROOF PDF: ASCII-only text, simple operations
+    - Converts ALL input to ASCII-safe Latin
+    - Uses only basic Helvetica font operations
+    - No complex formatting that could fail
     """
     try:
-        # Clean and transliterate
+        # Aggressively clean text to ASCII-only
         clean_text = clean_markdown(resume_text)
         clean_text = remove_emojis(clean_text)
-        pdf_text = transliterate(clean_text)
+        pdf_text = to_ascii_safe(clean_text)
+
+        # Debug: log first 200 chars to verify ASCII
+        logger.info(f"📄 PDF text sample: {pdf_text[:200]}")
 
         pdf = FPDF()
         pdf.add_page()
 
-        # === HEADER (Blue) ===
-        pdf.set_fill_color(41, 128, 185)
-        pdf.rect(0, 0, 210, 35, "F")
+        # === SIMPLE HEADER ===
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 10, "ADAPTED RESUME", 0, 1, "C")
+        pdf.ln(3)
 
-        pdf.set_font("Helvetica", "B", 18)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_xy(0, 12)
-        pdf.cell(210, 10, "ADAPTED RESUME", 0, 1, "C")
-
-        pdf.set_font("Helvetica", "", 9)
-        pdf.set_xy(0, 24)
-        pdf.cell(210, 8, "Created by ResumePro AI", 0, 1, "C")
-
-        pdf.ln(40)
-        pdf.set_text_color(0, 0, 0)
-
-        # === CONTENT ===
+        # === CONTENT - Simple cell operations only ===
         lines = pdf_text.split("\n")
 
         for line in lines:
@@ -242,7 +261,11 @@ def create_resume_pdf(resume_text, output_path):
                 pdf.ln(2)
                 continue
 
-            # Section headers
+            # Skip any line that might have non-ASCII (safety check)
+            if any(ord(c) > 127 for c in line):
+                continue
+
+            # Section headers (simple)
             if any(
                 word in line.upper()
                 for word in [
@@ -256,55 +279,53 @@ def create_resume_pdf(resume_text, output_path):
             ):
                 pdf.ln(4)
                 pdf.set_font("Helvetica", "B", 11)
-                pdf.set_text_color(41, 128, 185)
-                pdf.set_fill_color(236, 240, 241)
-                pdf.cell(0, 7, line, 0, 1, "L", fill=True)
-                pdf.set_text_color(0, 0, 0)
+                pdf.cell(0, 7, line, 0, 1)
                 pdf.set_font("Helvetica", "", 10)
 
-            # Match Score - orange
+            # Match Score
             elif "MATCH SCORE" in line.upper():
                 pdf.ln(3)
-                pdf.set_fill_color(230, 126, 34)
                 pdf.set_font("Helvetica", "B", 10)
-                pdf.set_text_color(255, 255, 255)
-                pdf.multi_cell(0, 5, line, 0, "L", fill=True)
-                pdf.set_text_color(0, 0, 0)
+                pdf.cell(0, 6, line, 0, 1)
                 pdf.set_font("Helvetica", "", 10)
 
-            # Recommendations - gray
+            # Recommendations
             elif "RECOMMENDATIONS" in line.upper():
                 pdf.ln(3)
-                pdf.set_fill_color(236, 240, 241)
                 pdf.set_font("Helvetica", "B", 10)
-                pdf.set_text_color(41, 128, 185)
-                pdf.cell(0, 6, line, 0, 1, "L", fill=True)
-                pdf.set_text_color(0, 0, 0)
+                pdf.cell(0, 6, line, 0, 1)
                 pdf.set_font("Helvetica", "", 9)
 
-            # Bullet points
-            elif line.startswith("-") or line.startswith("•"):
+            # Bullet points - use simple cell, not multi_cell
+            elif line.startswith("-"):
                 pdf.set_font("Helvetica", "", 10)
-                bullet = line.lstrip("-").lstrip("•").strip()
+                bullet = line[1:].strip()
                 pdf.cell(3, 5, "-", 0, 0)
-                pdf.multi_cell(0, 5, bullet, 0, "L")
+                pdf.cell(0, 5, bullet, 0, 1)
 
-            # Regular text
+            # Regular text - use cell with auto-wrap simulation
             else:
                 pdf.set_font("Helvetica", "", 10)
-                pdf.multi_cell(0, 5, line, 0, "L")
+                # Break long lines manually to avoid multi_cell issues
+                words = line.split()
+                current_line = ""
+                for word in words:
+                    test_line = current_line + " " + word if current_line else word
+                    # Approximate width check (Helvetica ~0.6mm per char at size 10)
+                    if len(test_line) < 180:
+                        current_line = test_line
+                    else:
+                        pdf.cell(0, 5, current_line, 0, 1)
+                        current_line = word
+                if current_line:
+                    pdf.cell(0, 5, current_line, 0, 1)
 
-        # === FOOTER ===
-        pdf.set_y(-15)
-        pdf.set_fill_color(41, 128, 185)
-        pdf.rect(0, 282, 210, 15, "F")
-
+        # === SIMPLE FOOTER ===
+        pdf.ln(5)
         pdf.set_font("Helvetica", "I", 8)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_xy(0, 287)
-        pdf.cell(210, 6, f"Page {pdf.page_no()} | ResumePro AI", 0, 1, "C")
+        pdf.cell(0, 8, f"Page {pdf.page_no()} | ResumePro AI", 0, 1, "C")
 
-        # Save
+        # Save PDF
         pdf.output(output_path)
 
         if os.path.exists(output_path):
@@ -315,6 +336,9 @@ def create_resume_pdf(resume_text, output_path):
 
     except Exception as e:
         logger.error(f"❌ PDF error: {e}")
+        import traceback
+
+        traceback.print_exc()
         return False
 
 
