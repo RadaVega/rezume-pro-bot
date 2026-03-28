@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-📦 ResumePro AI - PDF Generation & Utilities
-✅ FIXED: Unicode errors, emojis, text truncation, Cyrillic support
-✅ Uses DejaVu fonts for proper Russian text
+📦 ResumePro AI - Cyrillic-Safe PDF Generation
+✅ Uses simple approach that works with Arial/Helvetica
+✅ Converts Cyrillic to transliterated Latin for PDF compatibility
 """
 
 import os
@@ -18,7 +18,84 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# === MARKDOWN CLEANING ===
+# === TRANSLITERATION FOR PDF COMPATIBILITY ===
+# Convert Cyrillic to Latin for PDF (Arial/Helvetica don't support Cyrillic)
+CYRILLIC_TO_LATIN = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "yo",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+    "А": "A",
+    "Б": "B",
+    "В": "V",
+    "Г": "G",
+    "Д": "D",
+    "Е": "E",
+    "Ё": "Yo",
+    "Ж": "Zh",
+    "З": "Z",
+    "И": "I",
+    "Й": "Y",
+    "К": "K",
+    "Л": "L",
+    "М": "M",
+    "Н": "N",
+    "О": "O",
+    "П": "P",
+    "Р": "R",
+    "С": "S",
+    "Т": "T",
+    "У": "U",
+    "Ф": "F",
+    "Х": "Kh",
+    "Ц": "Ts",
+    "Ч": "Ch",
+    "Ш": "Sh",
+    "Щ": "Shch",
+    "Ъ": "",
+    "Ы": "Y",
+    "Ь": "",
+    "Э": "E",
+    "Ю": "Yu",
+    "Я": "Ya",
+}
+
+
+def transliterate_cyrillic(text):
+    """Convert Cyrillic to Latin for PDF compatibility"""
+    result = []
+    for char in text:
+        result.append(CYRILLIC_TO_LATIN.get(char, char))
+    return "".join(result)
 
 
 def clean_markdown(text):
@@ -55,7 +132,6 @@ def remove_emojis(text):
 
 
 def read_pdf(file_path):
-    """Extract text from PDF"""
     try:
         reader = PdfReader(file_path)
         text = ""
@@ -70,7 +146,6 @@ def read_pdf(file_path):
 
 
 def read_docx(file_path):
-    """Extract text from DOCX"""
     try:
         doc = Document(file_path)
         text = ""
@@ -84,7 +159,6 @@ def read_docx(file_path):
 
 
 def extract_text_from_file(file_path, file_type):
-    """Extract text based on file type"""
     if file_type.lower() == "pdf":
         return read_pdf(file_path)
     elif file_type.lower() in ["docx", "doc"]:
@@ -96,20 +170,16 @@ def extract_text_from_file(file_path, file_type):
 
 
 def parse_hh_vacancy(url):
-    """Parse vacancy from HH.ru API"""
     try:
         match = re.search(r"hh\.ru/vacancy/(\d+)", url)
         if not match:
             return "Invalid HH.ru URL"
-
         vacancy_id = match.group(1)
         api_url = f"https://api.hh.ru/vacancies/{vacancy_id}"
         headers = {"User-Agent": "ResumePro-Bot/1.0"}
-
         response = requests.get(api_url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
-
         title = data.get("name", "")
         company = data.get("employer", {}).get("name", "")
         description_html = data.get("description", "")
@@ -119,77 +189,49 @@ def parse_hh_vacancy(url):
         skills = ", ".join(s.get("name", "") for s in data.get("key_skills", []))
         experience = data.get("experience", {}).get("name", "")
         employment = data.get("employment", {}).get("name", "")
-
-        return f"ВАКАНСИЯ: {title}\nКОМПАНИЯ: {company}\nОПЫТ: {experience}\nЗАНЯТОСТЬ: {employment}\nНАВЫКИ: {skills}\n\nОПИСАНИЕ:\n{description}"
-
+        return f"VACANCY: {title}\nCOMPANY: {company}\nEXPERIENCE: {experience}\nEMPLOYMENT: {employment}\nSKILLS: {skills}\n\nDESCRIPTION:\n{description}"
     except Exception as e:
         logger.error(f"HH.ru error: {e}")
         return f"Error: {str(e)}"
 
 
-# === PROFESSIONAL PDF GENERATION ===
-
-FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-FONT_ITALIC = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf"
-FONTS_AVAILABLE = (
-    os.path.exists(FONT_REGULAR)
-    and os.path.exists(FONT_BOLD)
-    and os.path.exists(FONT_ITALIC)
-)
+# === SIMPLE, RELIABLE PDF GENERATION ===
 
 
 def create_resume_pdf(resume_text, output_path):
     """
-    🏆 GENERATES PROFESSIONAL PDF RESUME
-    Like Adapted_Resume1.pdf - Blue header, colored sections, proper formatting
-
-    Features:
-    - Removes emojis (cause encoding errors)
-    - Uses DejaVu fonts for Cyrillic
-    - Proper text wrapping (no truncation)
-    - Professional styling
+    ✅ CYRILLIC-SAFE PDF GENERATION
+    - Transliterates Cyrillic to Latin for PDF compatibility
+    - Uses standard Arial/Helvetica fonts (always available)
+    - No font loading errors
     """
     try:
-        # Clean text
+        # Clean and transliterate text
         clean_text = clean_markdown(resume_text)
-        clean_text = remove_emojis(clean_text)  # Remove emojis
+        clean_text = remove_emojis(clean_text)
+        pdf_text = transliterate_cyrillic(clean_text)
 
         pdf = FPDF()
         pdf.add_page()
 
-        # Setup fonts
-        font_family = "Arial"  # Default fallback
-        try:
-            if FONTS_AVAILABLE:
-                pdf.add_font("DejaVu", "", FONT_REGULAR, uni=True)
-                pdf.add_font("DejaVu", "B", FONT_BOLD, uni=True)
-                pdf.add_font("DejaVu", "I", FONT_ITALIC, uni=True)
-                font_family = "DejaVu"
-                logger.info("✅ Using DejaVu fonts for Cyrillic")
-            else:
-                logger.warning("⚠️ DejaVu fonts not found, using Arial")
-        except Exception as e:
-            logger.warning(f"⚠️ Font error: {e}, using Arial")
+        # === HEADER ===
+        pdf.set_fill_color(41, 128, 185)  # Blue
+        pdf.rect(0, 0, 210, 35, "F")
 
-        # === HEADER (Blue Background) ===
-        pdf.set_fill_color(41, 128, 185)  # Blue: #2980B9
-        pdf.rect(0, 0, 210, 40, "F")
-
-        pdf.set_font(font_family, "B", 22)
+        pdf.set_font("Arial", "B", 18)
         pdf.set_text_color(255, 255, 255)
-        pdf.set_xy(0, 15)
+        pdf.set_xy(0, 12)
         pdf.cell(210, 10, "ADAPTED RESUME", 0, 1, "C")
 
-        pdf.set_font(font_family, "", 10)
-        pdf.set_xy(0, 27)
+        pdf.set_font("Arial", "", 9)
+        pdf.set_xy(0, 24)
         pdf.cell(210, 8, "Created by ResumePro AI", 0, 1, "C")
 
-        pdf.ln(45)
+        pdf.ln(40)
         pdf.set_text_color(0, 0, 0)
 
         # === CONTENT ===
-        lines = clean_text.split("\n")
+        lines = pdf_text.split("\n")
 
         for line in lines:
             line = line.strip()
@@ -197,13 +239,7 @@ def create_resume_pdf(resume_text, output_path):
                 pdf.ln(2)
                 continue
 
-            # Safe encoding for all text
-            try:
-                safe_line = line.encode("latin-1", "replace").decode("latin-1")
-            except:
-                safe_line = line
-
-            # Section Headers (PROFILE, EXPERIENCE, etc.)
+            # Section headers
             if any(
                 word in line.upper()
                 for word in [
@@ -213,65 +249,54 @@ def create_resume_pdf(resume_text, output_path):
                     "SKILLS",
                     "MATCH",
                     "RECOMMENDATIONS",
-                    "ПРОФИЛЬ",
-                    "ОПЫТ",
-                    "ОБРАЗОВАНИЕ",
-                    "НАВЫКИ",
-                    "РЕКОМЕНДАЦИИ",
                 ]
             ):
-                pdf.ln(5)
-                pdf.set_font(font_family, "B", 12)
-                pdf.set_text_color(41, 128, 185)  # Blue
-                pdf.set_fill_color(236, 240, 241)  # Light gray
-                pdf.cell(0, 8, safe_line, 0, 1, "L", fill=True)
-                pdf.set_text_color(0, 0, 0)
-                pdf.set_font(font_family, "", 10)
-
-            # Match Score - Orange highlight
-            elif "MATCH SCORE" in line.upper():
                 pdf.ln(4)
-                pdf.set_fill_color(230, 126, 34)  # Orange: #E67E22
-                pdf.set_font(font_family, "B", 11)
-                pdf.set_text_color(255, 255, 255)
-                pdf.multi_cell(0, 6, safe_line, 0, "L", fill=True)
-                pdf.set_text_color(0, 0, 0)
-                pdf.set_font(font_family, "", 10)
-
-            # Recommendations - Gray background
-            elif "RECOMMENDATIONS" in line.upper() or "РЕКОМЕНДАЦИИ" in line.upper():
-                pdf.ln(4)
-                pdf.set_fill_color(236, 240, 241)  # Light gray
-                pdf.set_font(font_family, "B", 11)
+                pdf.set_font("Arial", "B", 11)
                 pdf.set_text_color(41, 128, 185)
-                pdf.cell(0, 7, safe_line, 0, 1, "L", fill=True)
+                pdf.set_fill_color(236, 240, 241)
+                pdf.cell(0, 7, line, 0, 1, "L", fill=True)
                 pdf.set_text_color(0, 0, 0)
-                pdf.set_font(font_family, "", 9)
+                pdf.set_font("Arial", "", 10)
+
+            # Match Score - orange
+            elif "MATCH SCORE" in line.upper():
+                pdf.ln(3)
+                pdf.set_fill_color(230, 126, 34)
+                pdf.set_font("Arial", "B", 10)
+                pdf.set_text_color(255, 255, 255)
+                pdf.multi_cell(0, 5, line, 0, "L", fill=True)
+                pdf.set_text_color(0, 0, 0)
+                pdf.set_font("Arial", "", 10)
+
+            # Recommendations - gray
+            elif "RECOMMENDATIONS" in line.upper():
+                pdf.ln(3)
+                pdf.set_fill_color(236, 240, 241)
+                pdf.set_font("Arial", "B", 10)
+                pdf.set_text_color(41, 128, 185)
+                pdf.cell(0, 6, line, 0, 1, "L", fill=True)
+                pdf.set_text_color(0, 0, 0)
+                pdf.set_font("Arial", "", 9)
 
             # Bullet points
             elif line.startswith("-") or line.startswith("•"):
-                pdf.set_font(font_family, "", 10)
-                bullet_text = line.lstrip("-").lstrip("•").strip()
-                try:
-                    safe_bullet = bullet_text.encode("latin-1", "replace").decode(
-                        "latin-1"
-                    )
-                except:
-                    safe_bullet = bullet_text
-                pdf.cell(3, 6, "-", 0, 0)
-                pdf.multi_cell(0, 5, safe_bullet, 0, "L")
+                pdf.set_font("Arial", "", 10)
+                bullet = line.lstrip("-").lstrip("•").strip()
+                pdf.cell(3, 5, "-", 0, 0)
+                pdf.multi_cell(0, 5, bullet, 0, "L")
 
-            # Regular text with proper wrapping
+            # Regular text
             else:
-                pdf.set_font(font_family, "", 10)
-                pdf.multi_cell(0, 5, safe_line, 0, "L")
+                pdf.set_font("Arial", "", 10)
+                pdf.multi_cell(0, 5, line, 0, "L")
 
         # === FOOTER ===
         pdf.set_y(-15)
         pdf.set_fill_color(41, 128, 185)
         pdf.rect(0, 282, 210, 15, "F")
 
-        pdf.set_font(font_family, "I", 8)
+        pdf.set_font("Arial", "I", 8)
         pdf.set_text_color(255, 255, 255)
         pdf.set_xy(0, 287)
         pdf.cell(210, 6, f"Page {pdf.page_no()} | ResumePro AI", 0, 1, "C")
@@ -279,7 +304,6 @@ def create_resume_pdf(resume_text, output_path):
         # Save PDF
         pdf.output(output_path)
 
-        # Verify
         if os.path.exists(output_path):
             size = os.path.getsize(output_path)
             logger.info(f"✅ PDF created: {output_path} ({size} bytes)")
@@ -296,7 +320,7 @@ def create_resume_pdf(resume_text, output_path):
         return False
 
 
-# Aliases for compatibility
+# Aliases
 def generate_resume_pdf(resume_text, output_path):
     return create_resume_pdf(resume_text, output_path)
 
