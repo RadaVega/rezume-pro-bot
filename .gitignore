@@ -173,3 +173,5 @@ __pycache__/
 .upm/
 uv.lock
 pyproject.toml
+main.py.backup
+generated-icon.png
