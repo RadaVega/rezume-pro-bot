@@ -68,28 +68,35 @@ def send_pdf_to_user(vk, user_id, pdf_path, vk_token):
 
         upload_server = vk.docs.getMessagesUploadServer(peer_id=user_id, type="doc")
         upload_url = upload_server["upload_url"]
+        logger.info(f"📤 Got upload URL, sending file...")
 
         with open(pdf_path, "rb") as f:
             files = {"file": ("Adapted_Resume.pdf", f, "application/pdf")}
-            response = requests.post(upload_url, files=files)
+            response = requests.post(upload_url, files=files, timeout=30)
+            response.raise_for_status()
             upload_data = response.json()
 
+        logger.info(f"📤 File uploaded, saving doc...")
         saved = vk.docs.save(file=upload_data["file"], title="Adapted_Resume.pdf")
         doc = saved[0] if isinstance(saved, list) else saved.get("doc", saved)
 
         owner_id = doc.get("owner_id")
         doc_id = doc.get("id")
         attachment = f"doc{owner_id}_{doc_id}"
+        logger.info(f"📤 Saved as {attachment}, sending to user...")
 
         vk.messages.send(
             peer_id=user_id,
-            message="📄 Your adapted resume in PDF format is ready!",
+            message="📄 Ваше адаптированное резюме в формате PDF:",
             attachment=attachment,
             random_id=0,
         )
+        logger.info(f"✅ PDF sent to {user_id}")
         return True
     except Exception as e:
         logger.error(f"❌ PDF upload failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
