@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🤖 ResumePro AI - VK Bot
-✅ Fixed: Message duplication, GigaChat model name, PDF generation
-✅ Uses model="GigaChat" (valid API name)
-✅ Cyrillic-safe PDF via transliteration
-✅ Message deduplication with hashlib
+🤖 ResumePro AI - VK Bot (Text Only - No PDF)
+✅ Simplified version - just text output
 """
 
 import os
@@ -22,12 +19,7 @@ from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 from langchain_gigachat.chat_models import GigaChat
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from utils import (
-    extract_text_from_file,
-    parse_hh_vacancy,
-    create_resume_pdf,
-    clean_markdown,
-)
+from utils import extract_text_from_file, parse_hh_vacancy, clean_markdown
 
 # === LOGGING ===
 logging.basicConfig(
@@ -43,7 +35,7 @@ app = Flask(__name__)
 def index():
     return f"""<html><body>
     <h1>🤖 ResumePro Bot Works!</h1>
-    <p>✅ Status: Active</p>
+    <p>✅ Status: Active (Text Mode)</p>
     <p>🕐 {time.strftime("%Y-%m-%d %H:%M:%S")}</p>
     <p>👥 <a href="https://vk.com/rezume_pro">vk.com/rezume_pro</a></p>
     </body></html>"""
@@ -58,129 +50,89 @@ def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
 
-# === PDF UPLOAD ===
-def send_pdf_to_user(vk, user_id, pdf_path, vk_token):
-    try:
-        logger.info(f"📤 Uploading PDF: {pdf_path}")
-        if not os.path.exists(pdf_path):
-            logger.error(f"❌ PDF not found: {pdf_path}")
-            return False
-
-        upload_server = vk.docs.getMessagesUploadServer(peer_id=user_id, type="doc")
-        upload_url = upload_server["upload_url"]
-        logger.info(f"📤 Got upload URL, sending file...")
-
-        with open(pdf_path, "rb") as f:
-            files = {"file": ("Adapted_Resume.pdf", f, "application/pdf")}
-            response = requests.post(upload_url, files=files, timeout=30)
-            response.raise_for_status()
-            upload_data = response.json()
-
-        logger.info(f"📤 File uploaded, saving doc...")
-        saved = vk.docs.save(file=upload_data["file"], title="Adapted_Resume.pdf")
-        doc = saved[0] if isinstance(saved, list) else saved.get("doc", saved)
-
-        owner_id = doc.get("owner_id")
-        doc_id = doc.get("id")
-        attachment = f"doc{owner_id}_{doc_id}"
-        logger.info(f"📤 Saved as {attachment}, sending to user...")
-
-        vk.messages.send(
-            peer_id=user_id,
-            message="📄 Ваше адаптированное резюме в формате PDF:",
-            attachment=attachment,
-            random_id=0,
-        )
-        logger.info(f"✅ PDF sent to {user_id}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ PDF upload failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
 # === GIGACHAT ADAPTATION ===
 def adapt_resume(resume_text, vacancy_text):
-    """Adapt resume using GigaChat API with fallback"""
-    try:
-        logger.info("🔄 Initializing GigaChat model...")
+    """Adapt resume using GigaChat API with retry logic"""
+    max_retries = 3
+    retry_delay = 5
 
-        # ✅ FIXED: Use valid model name "GigaChat" (not "GigaChat-Lite")
-        model = GigaChat(
-            credentials=os.getenv("GIGA_CREDENTIALS"),
-            scope=os.getenv("GIGA_SCOPE", "GIGACHAT_API_PERS"),
-            model="GigaChat",  # ✅ Valid API model name
-            verify_ssl_certs=False,
-        )
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"🔄 GigaChat attempt {attempt + 1}/{max_retries}...")
 
-        logger.info("✅ GigaChat model initialized")
+            model = GigaChat(
+                credentials=os.getenv("GIGA_CREDENTIALS"),
+                scope=os.getenv("GIGA_SCOPE", "GIGACHAT_API_PERS"),
+                model="GigaChat",
+                verify_ssl_certs=False,
+            )
 
-        prompt = ChatPromptTemplate.from_template("""Ты — ведущий карьерный консультант и эксперт уровня Rezi, Kickresume, Teal.
-Адаптируй резюме под вакансию: ATS-оптимизация, конкретные достижения с метриками, ключевые слова из вакансии.
+            prompt = ChatPromptTemplate.from_template("""Ты — ведущий карьерный консультант.
+Адаптируй резюме под вакансию: ATS-оптимизация, конкретные достижения с метриками.
 
 ПРАВИЛА: пиши ТОЛЬКО по-русски, не выдумывай факты, без символов * ** ### —-- и эмодзи.
 
 ИСХОДНОЕ РЕЗЮМЕ:
-{{resume}}
+{resume}
 
 ВАКАНСИЯ:
-{{vacancy}}
+{vacancy}
 
-Выведи ответ СТРОГО в формате ниже. Каждая строка-метка (ИМЯ:, ДОЛЖНОСТЬ: и т.д.) должна быть в начале строки:
+Выведи ответ СТРОГО в формате:
 
-ИМЯ: [полное имя кандидата из резюме]
-ДОЛЖНОСТЬ: [целевая должность под вакансию]
-КОНТАКТЫ: [email] | [телефон] | [город] | [LinkedIn/GitHub если есть]
+ИМЯ: [полное имя]
+ДОЛЖНОСТЬ: [целевая должность]
+КОНТАКТЫ: [email] | [телефон] | [город]
 
 ПРОФИЛЬ:
-[3-4 предложения: кто кандидат, лет опыта, ключевая экспертиза, почему подходит. Органично вставь ключевые слова из вакансии.]
+[3-4 предложения: кто кандидат, лет опыта, ключевая экспертиза]
 
 ОПЫТ:
-[Должность — только название]
+[Должность]
 [Компания] | [период]
-- [конкретное достижение с числовой метрикой]
-- [конкретное достижение с числовой метрикой]
-- [конкретное достижение с числовой метрикой]
-[следующее место работы...]
+- [достижение с метрикой]
+- [достижение с метрикой]
 
 ОБРАЗОВАНИЕ:
 [Степень, специальность]
 [Университет] | [год]
 
 НАВЫКИ:
-[навыки через запятую, приоритет — из вакансии]
+[навыки через запятую]
 
 MATCH:
 ATS Score: [XX%]
-Совпадения: [навык1, навык2, навык3, навык4]
-Преимущества: [1-2 предложения о сильных сторонах кандидата]
+Совпадения: [навык1, навык2, навык3]
+Преимущества: [1-2 предложения]
 
 РЕКОМЕНДАЦИИ:
-- [конкретная рекомендация 1]
-- [конкретная рекомендация 2]
-- [конкретная рекомендация 3]
-""".replace("{{resume}}", "{resume}").replace("{{vacancy}}", "{vacancy}"))
+- [рекомендация 1]
+- [рекомендация 2]
+- [рекомендация 3]
+""")
 
-        logger.info("🔄 Sending to GigaChat...")
+            chain = prompt | model | StrOutputParser()
+            result = chain.invoke(
+                {"resume": resume_text[:4000], "vacancy": vacancy_text[:3000]}
+            )
 
-        chain = prompt | model | StrOutputParser()
-        result = chain.invoke(
-            {"resume": resume_text[:4000], "vacancy": vacancy_text[:3000]}
-        )
+            if result and len(result) >= 100:
+                logger.info("✅ GigaChat success")
+                return clean_markdown(result)
 
-        logger.info("✅ GigaChat adaptation complete")
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "Too Many Requests" in error_str:
+                logger.warning(f"⚠️ Rate limited, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+            logger.error(f"❌ GigaChat error: {e}")
+            break
 
-        if not result or len(result) < 100:
-            logger.error("❌ GigaChat returned empty result")
-            return None
-
-        return clean_markdown(result)
-
-    except Exception as e:
-        logger.error(f"❌ GigaChat error: {e}")
-        # Fallback
-        return simple_fallback_adaptation(resume_text, vacancy_text)
+    # Fallback
+    logger.info("🔄 Using fallback adaptation")
+    return simple_fallback_adaptation(resume_text, vacancy_text)
 
 
 def simple_fallback_adaptation(resume_text, vacancy_text):
@@ -189,22 +141,28 @@ def simple_fallback_adaptation(resume_text, vacancy_text):
         name_match = re.search(r"([А-Я][а-я]+\s+[А-Я][а-я]+)", resume_text)
         name = name_match.group(1) if name_match else "Candidate"
 
-        return f"""📋 ПРОФЕССИОНАЛЬНЫЙ ПРОФИЛЬ
+        return f"""ИМЯ: {name}
+ДОЛЖНОСТЬ: Product Manager
+КОНТАКТЫ: [из резюме]
+
+ПРОФИЛЬ:
 Опытный специалист с релевантным опытом работы.
 
-💼 ОПЫТ РАБОТЫ
+ОПЫТ:
 {resume_text[:400]}...
 
-🎓 ОБРАЗОВАНИЕ
+ОБРАЗОВАНИЕ:
 [Информация об образовании]
 
-🛠 НАВЫКИ
+НАВЫКИ:
 [Навыки из резюме]
 
-📊 MATCH SCORE: 75%
-Базовое соответствие вакансии.
+MATCH:
+ATS Score: 75%
+Совпадения: базовые навыки
+Преимущества: релевантный опыт
 
-💡 РЕКОМЕНДАЦИИ
+РЕКОМЕНДАЦИИ:
 • Детализируйте достижения с метриками
 • Добавьте информацию о руководстве командами
 """
@@ -225,6 +183,7 @@ class UserState:
 
 
 def send_long_msg(vk, peer_id, text):
+    """Split long messages (VK limit: 4096 chars)"""
     max_len = 4000
     for i in range(0, len(text), max_len):
         vk.messages.send(peer_id=peer_id, message=text[i : i + max_len], random_id=0)
@@ -232,7 +191,7 @@ def send_long_msg(vk, peer_id, text):
 
 # === MESSAGE HANDLER ===
 def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN, message_id):
-    # ✅ DEDUPLICATION: Skip if already processed
+    # ✅ DEDUPLICATION
     msg_hash = hashlib.md5(f"{user_id}:{message_id}".encode()).hexdigest()
     if msg_hash in processed_messages:
         logger.info(f"⏭️ Skipping duplicate: {msg_hash[:8]}")
@@ -341,35 +300,11 @@ def handle_message(vk, user_id, raw_text, attachments, VK_TOKEN, message_id):
                 result = adapt_resume(user_states[user_id].resume_text, vacancy_text)
 
                 if result:
+                    # ✅ SEND TEXT RESULT (NO PDF)
                     send_long_msg(
                         vk, user_id, f"✅ Done! Your adapted resume:\n\n{result}"
                     )
 
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
-                        pdf_path = f.name
-
-                    logger.info(f"📄 Generating PDF: {pdf_path}")
-
-                    if create_resume_pdf(result, pdf_path):
-                        logger.info("✅ PDF created, uploading...")
-                        success = send_pdf_to_user(vk, user_id, pdf_path, VK_TOKEN)
-                        if not success:
-                            vk.messages.send(
-                                peer_id=user_id,
-                                message="⚠️ PDF upload failed, but text version is above!",
-                                random_id=0,
-                            )
-                    else:
-                        vk.messages.send(
-                            peer_id=user_id,
-                            message="⚠️ PDF generation failed. Use text version above.",
-                            random_id=0,
-                        )
-
-                    try:
-                        os.unlink(pdf_path)
-                    except:
-                        pass
                     user_states[user_id].step = "idle"
                 else:
                     vk.messages.send(
@@ -463,7 +398,7 @@ def run_bot():
                         uid = event.obj.message["from_id"]
                         txt = event.obj.message.get("text", "").strip()
                         att = event.obj.message.get("attachments", [])
-                        mid = event.obj.message["id"]  # ✅ Message ID for deduplication
+                        mid = event.obj.message["id"]
                         handle_message(vk, uid, txt, att, VK_TOKEN, mid)
                     except Exception as e:
                         logger.error(f"❌ Message error: {e}")
