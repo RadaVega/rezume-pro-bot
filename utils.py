@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-📦 ResumePro AI - Cyrillic-Safe PDF Generation
-✅ Uses simple approach that works with Arial/Helvetica
-✅ Converts Cyrillic to transliterated Latin for PDF compatibility
+📦 ResumePro AI - Utilities
+✅ FIXED: Dictionary-based Cyrillic transliteration (no maketrans length issue)
+✅ Cyrillic-safe PDF generation
 """
 
 import os
@@ -18,84 +18,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# === TRANSLITERATION FOR PDF COMPATIBILITY ===
-# Convert Cyrillic to Latin for PDF (Arial/Helvetica don't support Cyrillic)
-CYRILLIC_TO_LATIN = {
-    "а": "a",
-    "б": "b",
-    "в": "v",
-    "г": "g",
-    "д": "d",
-    "е": "e",
-    "ё": "yo",
-    "ж": "zh",
-    "з": "z",
-    "и": "i",
-    "й": "y",
-    "к": "k",
-    "л": "l",
-    "м": "m",
-    "н": "n",
-    "о": "o",
-    "п": "p",
-    "р": "r",
-    "с": "s",
-    "т": "t",
-    "у": "u",
-    "ф": "f",
-    "х": "kh",
-    "ц": "ts",
-    "ч": "ch",
-    "ш": "sh",
-    "щ": "shch",
-    "ъ": "",
-    "ы": "y",
-    "ь": "",
-    "э": "e",
-    "ю": "yu",
-    "я": "ya",
-    "А": "A",
-    "Б": "B",
-    "В": "V",
-    "Г": "G",
-    "Д": "D",
-    "Е": "E",
-    "Ё": "Yo",
-    "Ж": "Zh",
-    "З": "Z",
-    "И": "I",
-    "Й": "Y",
-    "К": "K",
-    "Л": "L",
-    "М": "M",
-    "Н": "N",
-    "О": "O",
-    "П": "P",
-    "Р": "R",
-    "С": "S",
-    "Т": "T",
-    "У": "U",
-    "Ф": "F",
-    "Х": "Kh",
-    "Ц": "Ts",
-    "Ч": "Ch",
-    "Ш": "Sh",
-    "Щ": "Shch",
-    "Ъ": "",
-    "Ы": "Y",
-    "Ь": "",
-    "Э": "E",
-    "Ю": "Yu",
-    "Я": "Ya",
-}
-
-
-def transliterate_cyrillic(text):
-    """Convert Cyrillic to Latin for PDF compatibility"""
-    result = []
-    for char in text:
-        result.append(CYRILLIC_TO_LATIN.get(char, char))
-    return "".join(result)
+# === MARKDOWN CLEANING ===
 
 
 def clean_markdown(text):
@@ -113,7 +36,7 @@ def clean_markdown(text):
 
 
 def remove_emojis(text):
-    """Remove emojis - they cause PDF encoding errors"""
+    """Remove emojis - cause PDF encoding errors"""
     emoji_pattern = re.compile(
         "["
         "\U0001f600-\U0001f64f"
@@ -195,35 +118,115 @@ def parse_hh_vacancy(url):
         return f"Error: {str(e)}"
 
 
-# === SIMPLE, RELIABLE PDF GENERATION ===
+# === CYRILLIC TRANSLITERATION (DICTIONARY-BASED) ===
+
+CYR_DICT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "yo",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+    "А": "A",
+    "Б": "B",
+    "В": "V",
+    "Г": "G",
+    "Д": "D",
+    "Е": "E",
+    "Ё": "Yo",
+    "Ж": "Zh",
+    "З": "Z",
+    "И": "I",
+    "Й": "Y",
+    "К": "K",
+    "Л": "L",
+    "М": "M",
+    "Н": "N",
+    "О": "O",
+    "П": "P",
+    "Р": "R",
+    "С": "S",
+    "Т": "T",
+    "У": "U",
+    "Ф": "F",
+    "Х": "Kh",
+    "Ц": "Ts",
+    "Ч": "Ch",
+    "Ш": "Sh",
+    "Щ": "Shch",
+    "Ъ": "",
+    "Ы": "Y",
+    "Ь": "",
+    "Э": "E",
+    "Ю": "Yu",
+    "Я": "Ya",
+}
+
+
+def transliterate(text):
+    """Convert Cyrillic to Latin using dictionary (supports multi-char mappings)"""
+    result = []
+    for char in text:
+        result.append(CYR_DICT.get(char, char))
+    return "".join(result)
+
+
+# === PDF GENERATION (CYRILLIC-SAFE) ===
 
 
 def create_resume_pdf(resume_text, output_path):
     """
     ✅ CYRILLIC-SAFE PDF GENERATION
-    - Transliterates Cyrillic to Latin for PDF compatibility
-    - Uses standard Arial/Helvetica fonts (always available)
-    - No font loading errors
+    - Dictionary-based transliteration (no maketrans length issue)
+    - Uses standard Helvetica font (always available)
+    - Professional styling with colors
     """
     try:
-        # Clean and transliterate text
+        # Clean and transliterate
         clean_text = clean_markdown(resume_text)
         clean_text = remove_emojis(clean_text)
-        pdf_text = transliterate_cyrillic(clean_text)
+        pdf_text = transliterate(clean_text)
 
         pdf = FPDF()
         pdf.add_page()
 
-        # === HEADER ===
-        pdf.set_fill_color(41, 128, 185)  # Blue
+        # === HEADER (Blue) ===
+        pdf.set_fill_color(41, 128, 185)
         pdf.rect(0, 0, 210, 35, "F")
 
-        pdf.set_font("Arial", "B", 18)
+        pdf.set_font("Helvetica", "B", 18)
         pdf.set_text_color(255, 255, 255)
         pdf.set_xy(0, 12)
         pdf.cell(210, 10, "ADAPTED RESUME", 0, 1, "C")
 
-        pdf.set_font("Arial", "", 9)
+        pdf.set_font("Helvetica", "", 9)
         pdf.set_xy(0, 24)
         pdf.cell(210, 8, "Created by ResumePro AI", 0, 1, "C")
 
@@ -252,43 +255,43 @@ def create_resume_pdf(resume_text, output_path):
                 ]
             ):
                 pdf.ln(4)
-                pdf.set_font("Arial", "B", 11)
+                pdf.set_font("Helvetica", "B", 11)
                 pdf.set_text_color(41, 128, 185)
                 pdf.set_fill_color(236, 240, 241)
                 pdf.cell(0, 7, line, 0, 1, "L", fill=True)
                 pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", "", 10)
+                pdf.set_font("Helvetica", "", 10)
 
             # Match Score - orange
             elif "MATCH SCORE" in line.upper():
                 pdf.ln(3)
                 pdf.set_fill_color(230, 126, 34)
-                pdf.set_font("Arial", "B", 10)
+                pdf.set_font("Helvetica", "B", 10)
                 pdf.set_text_color(255, 255, 255)
                 pdf.multi_cell(0, 5, line, 0, "L", fill=True)
                 pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", "", 10)
+                pdf.set_font("Helvetica", "", 10)
 
             # Recommendations - gray
             elif "RECOMMENDATIONS" in line.upper():
                 pdf.ln(3)
                 pdf.set_fill_color(236, 240, 241)
-                pdf.set_font("Arial", "B", 10)
+                pdf.set_font("Helvetica", "B", 10)
                 pdf.set_text_color(41, 128, 185)
                 pdf.cell(0, 6, line, 0, 1, "L", fill=True)
                 pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", "", 9)
+                pdf.set_font("Helvetica", "", 9)
 
             # Bullet points
             elif line.startswith("-") or line.startswith("•"):
-                pdf.set_font("Arial", "", 10)
+                pdf.set_font("Helvetica", "", 10)
                 bullet = line.lstrip("-").lstrip("•").strip()
                 pdf.cell(3, 5, "-", 0, 0)
                 pdf.multi_cell(0, 5, bullet, 0, "L")
 
             # Regular text
             else:
-                pdf.set_font("Arial", "", 10)
+                pdf.set_font("Helvetica", "", 10)
                 pdf.multi_cell(0, 5, line, 0, "L")
 
         # === FOOTER ===
@@ -296,27 +299,22 @@ def create_resume_pdf(resume_text, output_path):
         pdf.set_fill_color(41, 128, 185)
         pdf.rect(0, 282, 210, 15, "F")
 
-        pdf.set_font("Arial", "I", 8)
+        pdf.set_font("Helvetica", "I", 8)
         pdf.set_text_color(255, 255, 255)
         pdf.set_xy(0, 287)
         pdf.cell(210, 6, f"Page {pdf.page_no()} | ResumePro AI", 0, 1, "C")
 
-        # Save PDF
+        # Save
         pdf.output(output_path)
 
         if os.path.exists(output_path):
             size = os.path.getsize(output_path)
             logger.info(f"✅ PDF created: {output_path} ({size} bytes)")
             return True
-        else:
-            logger.error("❌ PDF file not created!")
-            return False
+        return False
 
     except Exception as e:
-        logger.error(f"❌ PDF generation failed: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.error(f"❌ PDF error: {e}")
         return False
 
 
