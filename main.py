@@ -9,7 +9,9 @@ import logging
 from flask import Flask, request, jsonify
 from vk_api import VkApi
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
+from vk_api.exceptions import ApiError as VkApiError
 from gigachat import GigaChat
+
 from services.resume_generator import AntiHallucinationGenerator
 from utils.validation import get_validation_summary
 from config.settings import Config
@@ -38,22 +40,38 @@ longpoll = VkBotLongPoll(vk_session, Config.VK_GROUP_ID)
 logger.info("🔄 Connecting to GigaChat...")
 gigachat = GigaChat(credentials=Config.GIGACHAT_API_KEY, verify_ssl_certs=False)
 generator = AntiHallucinationGenerator(gigachat, max_retries=Config.MAX_RETRIES)
-
 logger.info("✅ Bot started! Group: %s", Config.VK_GROUP_ID)
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def send_vk_message(user_id: int, text: str) -> None:
-    """Send a message to a VK user, truncating if too long."""
-    MAX_LEN = 4096
-    if len(text) > MAX_LEN:
-        text = text[: MAX_LEN - 3] + "..."
-    vk_session.method(
-        "messages.send",
-        {"user_id": user_id, "message": text, "random_id": 0},
-    )
+def send_vk_message(user_id: int, text: str) -> bool:
+    """
+    Send a message to a VK user, truncating if too long.
+    Returns True if sent successfully, False if failed.
+    """
+    try:
+        MAX_LEN = 4096
+        if len(text) > MAX_LEN:
+            text = text[: MAX_LEN - 3] + "..."
+
+        vk_session.method(
+            "messages.send",
+            {"user_id": user_id, "message": text, "random_id": 0},
+        )
+        return True
+    except VkApiError as e:
+        # Handle VK API errors gracefully
+        if e.code == 901:  # Can't send messages for users without permission
+            logger.warning(
+                f"⚠️ Cannot message user {user_id}: permission denied (VK error 901)"
+            )
+            return False
+        logger.error(f"❌ VK API error sending to user {user_id}: {e}")
+        return False
+    except Exception as e:
+        logger.exception(f"❌ Unexpected error sending to user {user_id}: {e}")
+        return False
 
 
 def build_resume_response(result: str, metadata: dict) -> str:
@@ -77,6 +95,7 @@ def build_cover_letter_response(letter: str, metadata: dict) -> str:
     """Format the cover letter response for the user."""
     if metadata.get("fallback_used"):
         return letter  # Already contains the fallback message
+
     conf = metadata.get("validation", {}).get("confidence", 1.0) * 100
     return f"📝 Сопроводительное письмо (уверенность: {conf:.0f}%):\n\n{letter}"
 
@@ -91,7 +110,11 @@ def webhook():
 
     # ── Confirmation handshake ────────────────────────────────────────────────
     if data.get("type") == "confirmation":
-        return Config.VK_CONFIRMATION_TOKEN or "ok"
+        # Return confirmation token from config, or fallback to "ok"
+        token = getattr(Config, "VK_CONFIRMATION_TOKEN", None) or os.getenv(
+            "VK_CONFIRMATION_TOKEN", "ok"
+        )
+        return str(token)
 
     if data.get("type") != "message_new":
         return jsonify({"status": "ok"})
@@ -149,17 +172,22 @@ def webhook():
                 "👋 ResumePro AI\n\n"
                 "Команды:\n"
                 "• Пришлите ссылку hh.ru/vacancy/... — адаптируем резюме\n"
-                "• /letter <ссылка>              — сопроводительное письмо\n"
-                "• /health                       — статус бота"
+                "• /letter <ссылка> — сопроводительное письмо\n"
+                "• /health — статус бота"
             )
 
-        send_vk_message(user_id, response)
+        # Send response, but don't fail if VK permission error
+        if not send_vk_message(user_id, response):
+            logger.warning(f"⚠️ Failed to send response to user {user_id}")
+
         logger.info("✅ Response sent to user %s", user_id)
 
     except Exception as e:
         logger.exception("Error processing message from user %s: %s", user_id, e)
+        # Try to send error message, but don't fail the webhook if this also fails
         send_vk_message(user_id, "❌ Произошла ошибка. Попробуйте позже.")
 
+    # Always return 200 to VK — they expect this
     return jsonify({"status": "ok"})
 
 
@@ -185,6 +213,7 @@ def validate_endpoint():
     body = request.json or {}
     original = body.get("original", "")
     adapted = body.get("adapted", "")
+
     if not original or not adapted:
         return jsonify({"error": "original and adapted fields are required"}), 400
 
@@ -192,6 +221,7 @@ def validate_endpoint():
 
     result = validate_resume_facts(original, adapted)
     result["summary"] = get_validation_summary(result)
+
     # Convert sets to lists for JSON serialisation
     result["original_entities"] = {
         k: list(v) if hasattr(v, "__iter__") and not isinstance(v, str) else v
@@ -201,8 +231,11 @@ def validate_endpoint():
         k: list(v) if hasattr(v, "__iter__") and not isinstance(v, str) else v
         for k, v in result.get("adapted_entities", {}).items()
     }
+
     return jsonify(result)
 
+
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     logger.info("🚀 Starting ResumePro AI bot v5.0...")

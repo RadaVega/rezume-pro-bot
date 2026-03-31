@@ -53,6 +53,47 @@ class AntiHallucinationGenerator:
             vacancy_text=vacancy_text,
         )
 
+    def _enrich_prompt(self, base_prompt: str, resume_text: str) -> str:
+        """
+        Inject a concrete list of allowed skills/companies into the prompt.
+        GigaChat responds much better to explicit lists than to abstract rules.
+        """
+        from utils.validation import extract_entities, TECH_SKILLS
+
+        entities = extract_entities(resume_text)
+        allowed_tech = sorted(entities["skills"] & TECH_SKILLS)
+        allowed_companies = sorted(entities["companies"])
+        allowed_years = sorted(entities["years"])
+
+        lines = [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "📋 ТОЧНЫЙ СПИСОК ТОГО, ЧТО ЕСТЬ В РЕЗЮМЕ:",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+
+        if allowed_tech:
+            lines.append(f"  ✅ Технические навыки: {', '.join(allowed_tech)}")
+        else:
+            lines.append("  ✅ Технические навыки: НЕ УКАЗАНЫ (не добавляй ни одного)")
+
+        if allowed_companies:
+            lines.append(f"  ✅ Компании: {', '.join(allowed_companies)}")
+
+        if allowed_years:
+            lines.append(f"  ✅ Годы работы: {', '.join(allowed_years)}")
+
+        lines += [
+            "",
+            "⛔ АБСОЛЮТНЫЙ ЗАПРЕТ: не добавляй НИ ОДНОГО технического навыка,",
+            "   компании или даты, которых нет в списке выше.",
+            "   Если вакансия требует навык не из списка — просто пропусти его.",
+            "   НЕ ПИШИ '[Нет в резюме]' или 'Навык не указан' — просто пропусти.",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+
+        return base_prompt + "\n".join(lines)
+
     def _build_retry_prompt(self, base_prompt: str, issues: list, attempt: int) -> str:
         """
         Append a correction note to the BASE prompt (not to previous retries),
@@ -66,19 +107,19 @@ class AntiHallucinationGenerator:
 
     @staticmethod
     def _fallback_response(resume_text: str, issues: list) -> str:
-        issues_text = (
-            "\n".join(f"  - {i}" for i in issues) if issues else "  — нет данных"
-        )
+        # IMPORTANT: Do NOT include the raw issues text here.
+        # Issues contain the hallucinated keywords (e.g. "python, sql"), and
+        # including them would cause forbidden-keyword checks to fire on the
+        # fallback output even though the user only receives the original resume.
+        attempt_count = len(issues)
         return (
             resume_text
             + "\n\n"
             + "─" * 60
             + "\n"
-            + "⚠️ ВНИМАНИЕ: Система не смогла безопасно адаптировать резюме.\n\n"
-            + "Причины:\n"
-            + issues_text
-            + "\n\n"
-            + "Ниже — исходный текст резюме без изменений.\n"
+            + "⚠️ ВНИМАНИЕ: Не удалось безопасно адаптировать резюме "
+            + f"после {attempt_count} попыток.\n"
+            + "Возвращаем исходный текст без изменений.\n"
             + "─" * 60
         )
 
@@ -102,7 +143,10 @@ class AntiHallucinationGenerator:
             "validation": None,
         }
 
-        base_prompt = self._build_base_prompt(resume_text, vacancy_text)
+        base_prompt = self._enrich_prompt(
+            self._build_base_prompt(resume_text, vacancy_text),
+            resume_text,
+        )
 
         for attempt in range(self.max_retries + 1):
             metadata["attempts"] = attempt + 1
@@ -170,9 +214,12 @@ class AntiHallucinationGenerator:
             "validation": None,
         }
 
-        base_prompt = SYSTEM_PROMPT_COVER_LETTER.format(
-            resume_text=resume_text,
-            vacancy_text=vacancy_text,
+        base_prompt = self._enrich_prompt(
+            SYSTEM_PROMPT_COVER_LETTER.format(
+                resume_text=resume_text,
+                vacancy_text=vacancy_text,
+            ),
+            resume_text,
         )
 
         for attempt in range(self.max_retries + 1):
