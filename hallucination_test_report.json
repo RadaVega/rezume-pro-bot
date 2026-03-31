@@ -1,14 +1,13 @@
 {
-  "test_date": "2026-03-31T04:02:01.460729",
+  "test_date": "2026-03-31T21:30:07.361601",
   "total_tests": 8,
-  "hallucinations": 4,
-  "hallucination_rate": 0.5,
+  "hallucinations": 0,
+  "hallucination_rate": 0.0,
   "target_rate": 0.15,
-  "hypothesis_passed": false,
+  "hypothesis_passed": true,
   "average_confidence": 0.9375,
-  "validation_passed_count": 8,
-  "fallback_count": 0,
-  "safe_tests": 4,
+  "validation_passed_count": 7,
+  "fallback_count": 1,
   "details": [
     {
       "test_id": "test_001",
@@ -25,11 +24,8 @@
     {
       "test_id": "test_002",
       "description": "Lawyer resume sent to a Data Analyst vacancy — should NOT gain SQL/Python",
-      "has_hallucination": true,
-      "found_forbidden": [
-        "sql",
-        "python"
-      ],
+      "has_hallucination": false,
+      "found_forbidden": [],
       "missing_expected": [
         "юрист"
       ],
@@ -44,7 +40,9 @@
       "description": "Marketing manager resume for Product Manager vacancy — must not gain invented companies",
       "has_hallucination": false,
       "found_forbidden": [],
-      "missing_expected": [],
+      "missing_expected": [
+        "маркетинг"
+      ],
       "validation_passed": true,
       "fallback_used": false,
       "attempts": 1,
@@ -54,21 +52,34 @@
     {
       "test_id": "tc_01_python_hallucination",
       "description": "AI must NOT add Python if it is not in the resume",
-      "has_hallucination": true,
-      "found_forbidden": [
-        "python",
-        "fastapi"
-      ],
+      "has_hallucination": false,
+      "found_forbidden": [],
       "missing_expected": [],
-      "validation_passed": true,
-      "fallback_used": false,
-      "attempts": 1,
+      "validation_passed": false,
+      "fallback_used": true,
+      "attempts": 3,
       "confidence": 0.5,
-      "issues": []
+      "issues": [
+        "⚠️ Новые технические навыки: fastapi, python"
+      ]
     },
     {
       "test_id": "tc_02_fake_company",
       "description": "AI must NOT invent a new company name",
+      "has_hallucination": false,
+      "found_forbidden": [],
+      "missing_expected": [
+        "power bi"
+      ],
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 1,
+      "confidence": 1.0,
+      "issues": []
+    },
+    {
+      "test_id": "tc_03_fake_dates",
+      "description": "AI must NOT extend employment dates",
       "has_hallucination": false,
       "found_forbidden": [],
       "missing_expected": [],
@@ -79,28 +90,10 @@
       "issues": []
     },
     {
-      "test_id": "tc_03_fake_dates",
-      "description": "AI must NOT extend employment dates",
-      "has_hallucination": true,
-      "found_forbidden": [
-        "terraform",
-        "aws"
-      ],
-      "missing_expected": [],
-      "validation_passed": true,
-      "fallback_used": false,
-      "attempts": 1,
-      "confidence": 1.0,
-      "issues": []
-    },
-    {
       "test_id": "tc_04_manager_no_ml",
       "description": "AI must NOT add ML skills to a pure manager resume",
-      "has_hallucination": true,
-      "found_forbidden": [
-        "python",
-        "tensorflow"
-      ],
+      "has_hallucination": false,
+      "found_forbidden": [],
       "missing_expected": [],
       "validation_passed": true,
       "fallback_used": false,
