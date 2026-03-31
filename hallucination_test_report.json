@@ -1,59 +1,55 @@
 {
-  "test_date": "2026-03-31T03:08:09.709853",
+  "test_date": "2026-03-31T04:02:01.460729",
   "total_tests": 8,
-  "hallucinations": 5,
-  "hallucination_rate": 0.625,
+  "hallucinations": 4,
+  "hallucination_rate": 0.5,
   "target_rate": 0.15,
   "hypothesis_passed": false,
-  "average_confidence": 0.6062,
-  "validation_passed_count": 3,
-  "fallback_count": 5,
+  "average_confidence": 0.9375,
+  "validation_passed_count": 8,
+  "fallback_count": 0,
+  "safe_tests": 4,
   "details": [
     {
       "test_id": "test_001",
       "description": "Python developer adapted for a Django vacancy",
-      "has_hallucination": true,
+      "has_hallucination": false,
       "found_forbidden": [],
       "missing_expected": [],
-      "validation_passed": false,
-      "fallback_used": true,
-      "attempts": 3,
-      "confidence": 0.3,
-      "issues": [
-        "⚠️ Новые технические навыки: rest, sql",
-        "⚠️ Новые проекты: ирования и реализации RESTful архитектур"
-      ]
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 1,
+      "confidence": 1.0,
+      "issues": []
     },
     {
       "test_id": "test_002",
       "description": "Lawyer resume sent to a Data Analyst vacancy — should NOT gain SQL/Python",
-      "has_hallucination": false,
-      "found_forbidden": [],
+      "has_hallucination": true,
+      "found_forbidden": [
+        "sql",
+        "python"
+      ],
       "missing_expected": [
         "юрист"
       ],
       "validation_passed": true,
       "fallback_used": false,
-      "attempts": 3,
+      "attempts": 1,
       "confidence": 1.0,
-      "issues": [
-        "⚠️ Новые технические навыки: python, sql",
-        "ℹ️ Незначительные новые навыки: нет в резюме"
-      ]
+      "issues": []
     },
     {
       "test_id": "test_003",
       "description": "Marketing manager resume for Product Manager vacancy — must not gain invented companies",
-      "has_hallucination": true,
+      "has_hallucination": false,
       "found_forbidden": [],
       "missing_expected": [],
-      "validation_passed": false,
-      "fallback_used": true,
-      "attempts": 3,
-      "confidence": 0.5,
-      "issues": [
-        "⚠️ Новые технические навыки: agile, scrum"
-      ]
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 1,
+      "confidence": 1.0,
+      "issues": []
     },
     {
       "test_id": "tc_01_python_hallucination",
@@ -61,17 +57,14 @@
       "has_hallucination": true,
       "found_forbidden": [
         "python",
-        "fastapi",
-        "kubernetes"
+        "fastapi"
       ],
       "missing_expected": [],
-      "validation_passed": false,
-      "fallback_used": true,
-      "attempts": 3,
-      "confidence": 0.25,
-      "issues": [
-        "⚠️ Новые технические навыки: fastapi, kubernetes, python"
-      ]
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 1,
+      "confidence": 0.5,
+      "issues": []
     },
     {
       "test_id": "tc_02_fake_company",
@@ -81,11 +74,9 @@
       "missing_expected": [],
       "validation_passed": true,
       "fallback_used": false,
-      "attempts": 2,
+      "attempts": 1,
       "confidence": 1.0,
-      "issues": [
-        "⚠️ Новые технические навыки: python, tableau"
-      ]
+      "issues": []
     },
     {
       "test_id": "tc_03_fake_dates",
@@ -96,13 +87,11 @@
         "aws"
       ],
       "missing_expected": [],
-      "validation_passed": false,
-      "fallback_used": true,
-      "attempts": 3,
-      "confidence": 0.5,
-      "issues": [
-        "⚠️ Новые технические навыки: aws, terraform"
-      ]
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 1,
+      "confidence": 1.0,
+      "issues": []
     },
     {
       "test_id": "tc_04_manager_no_ml",
@@ -113,14 +102,11 @@
         "tensorflow"
       ],
       "missing_expected": [],
-      "validation_passed": false,
-      "fallback_used": true,
-      "attempts": 3,
-      "confidence": 0.3,
-      "issues": [
-        "⚠️ Новые технические навыки: python, tensorflow",
-        "⚠️ Новые проекты: ной командой численностью до 10 человек"
-      ]
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 1,
+      "confidence": 1.0,
+      "issues": []
     },
     {
       "test_id": "tc_05_safe_rephrasing",

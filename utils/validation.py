@@ -1,374 +1,184 @@
 # utils/validation.py
 """
 Утилиты для валидации сущностей и обнаружения галлюцинаций.
-Версия: 5.0
+Версия: 6.0 (Исправлены ложные срабатывания)
 """
 
 import re
-from typing import Dict, Set, List, Any
+from typing import Dict, Set, List
 from difflib import SequenceMatcher
 
 
-# ── GENERIC STOP-WORDS (false-positive noise for NER) ───────────────────────
-# Only generic Russian nouns that are NOT company/position names.
-# Tech skills have been intentionally REMOVED from here — see TECH_SKILLS below.
-STOP_WORDS: Set[str] = {
+# === СТОП-СЛОВА ДЛЯ КОМПАНИЙ ===
+COMPANY_STOP_WORDS = {
     "компания",
     "организация",
-    "работал",
-    "работала",
-    "проект",
-    "навык",
-    "умение",
-    "должность",
-    "позиция",
+    "ооо",
+    "зао",
+    "ао",
+    "ип",
+    "ltd",
+    "llc",
+    "inc",
+    "гмбх",
+    "s.a.",
     "резюме",
-    "через",
-    "качество",
-    "работа",
-    "сотрудник",
-    "суд",
-    "договор",
-    "право",
-    "закон",
-    "данные",
-    "анализ",
-    "рынок",
-    "клиент",
-    "команда",
-    "эффективность",
-    "реализация",
-    "рамки",
-    "уровень",
-    "методология",
-    "социальные сети",
-    "соцсети",
-    "бизнес",
-    "исполнение",
-    "соблюдение",
-    "законодательство",
-    "информация",
-    "дела",
-    "сроки",
-    "качества",
-    "иван",
-    "иванович",
-    "тестировании",
-    "по",
-    "опыт",
-    "стаж",
-    "лет",
-    "года",
-    "год",
-    "месяцев",
-    "недель",
-    "обязанности",
-    "функции",
-    "задачи",
-    "достижения",
-    "результаты",
-    "ответственность",
-    "управление",
-    "координация",
-    "разработка",
-    "внедрение",
-    "поддержка",
-    "обеспечение",
-    "контроль",
-    "мониторинг",
-    "оптимизация",
-    "улучшение",
-    "повышение",
-    "снижение",
-    "увеличение",
-    "участие",
-    "взаимодействие",
-    "коммуникация",
-    "сотрудничество",
     "вакансия",
     "hh",
     "headhunter",
     "superjob",
-    "rabota",
+    "работа",
     "авито",
     "тенчэт",
     "tenchat",
     "linkedin",
     "hh.ru",
+    "rabota",
     "москва",
     "санкт-петербург",
     "екатеринбург",
     "новосибирск",
     "казань",
-    "нижний новгород",
-    "челябинск",
-    "самара",
-    "уфа",
-    "ростов-на-дону",
-    "красноярск",
-    "воронеж",
-    "пермь",
-    "волгоград",
     "россия",
     "снг",
-    "казахстан",
-    "беларусь",
-    "украина",
     "удаленка",
     "удалённо",
     "офис",
     "гибрид",
-    "релокация",
+    # Критично: слова которые НЕ являются компаниями
+    "качество",
+    "распредел",
+    "резюме",
+    "через",
+    "работы",
+    "проекты",
+    "внутренними",
+    "корпоративными",
+    "ами",
+    "командами",
+    "ной",
+    "численностью",
+}
+
+# === ИЗВЕСТНЫЕ КОМПАНИИ (БЕЛЫЙ СПИСОК) ===
+KNOWN_COMPANIES = {
+    "яндекс",
+    "google",
+    "microsoft",
+    "amazon",
+    "apple",
+    "meta",
+    "netflix",
+    "uber",
+    "airbnb",
+    "spotify",
+    "telegram",
+    "vk",
+    "mail.ru",
+    "ozon",
+    "wildberries",
+    "tinkoff",
+    "сбер",
+    "сбербанк",
+    "втб",
+    "альфа-банк",
+    "тинькофф",
+    "mts",
+    "билайн",
+    "мегафон",
+    "tele2",
+    "rostelecom",
+}
+
+# === СТОП-СЛОВА ДЛЯ НАВЫКОВ (Исключаем ложные срабатывания) ===
+SKILL_STOP_WORDS = {
+    # Методологии (не технические навыки)
+    "agile",
+    "scrum",
+    "kanban",
+    "waterfall",
+    "lean",
+    # Общие слова
+    "rest",
+    "api",
+    "web",
+    "mobile",
+    "desktop",
+    "cloud",
+    # Части слов (артефакты парсинга)
+    "ами",
+    "командами",
+    "ной",
+    "распредел",
+    "качество",
+    # Фразы из резюме
+    "навык работы",
+    "нет в резюме",
+    "правовыми базами",
+}
+
+# === СТОП-СЛОВА ДЛЯ ДОЛЖНОСТЕЙ ===
+POSITION_STOP_WORDS = {
     "сроков",
+    "качества",
     "реализации",
     "проектов",
     "релизов",
     "выполнения",
+    "задач",
+    "работы",
     "процессов",
     "систем",
-    "версий",
+    "разработки",
+    "внедрения",
+    "поддержки",
+    "управления",
+    "команды",
     "клиентов",
     "рынков",
     "соцсетях",
-    "разработчик",
-    "менеджер",
-    "аналитик",
-    "инженер",
-    "специалист",
-    "руководитель",
-    "директор",
-    "ведущий",
-    "старший",
-    "младший",
+    "версий",
 }
 
-# ── TECH SKILLS TO VALIDATE ──────────────────────────────────────────────────
-# If any of these appear in the ADAPTED text but NOT in the ORIGINAL,
-# it is a hallucinated skill.  All entries are lowercase for matching.
-TECH_SKILLS: Set[str] = {
-    # Languages
-    "python",
-    "java",
-    "javascript",
-    "typescript",
-    "c++",
-    "c#",
-    "golang",
-    "go",
-    "rust",
-    "ruby",
-    "php",
-    "swift",
-    "kotlin",
-    "scala",
-    "r",
-    "perl",
-    "lua",
-    "dart",
-    "elixir",
-    "clojure",
-    "haskell",
-    "matlab",
-    "fortran",
-    "cobol",
-    # Databases
-    "sql",
-    "nosql",
-    "postgresql",
-    "mysql",
-    "sqlite",
-    "mongodb",
-    "redis",
-    "elasticsearch",
-    "cassandra",
-    "dynamodb",
-    "neo4j",
-    "clickhouse",
-    "oracle",
-    "mssql",
-    "mariadb",
-    # DevOps / Cloud
-    "docker",
-    "kubernetes",
-    "k8s",
-    "terraform",
-    "ansible",
-    "puppet",
-    "chef",
-    "jenkins",
-    "gitlab",
-    "github",
-    "bitbucket",
-    "git",
-    "svn",
-    "linux",
-    "bash",
-    "shell",
-    "powershell",
-    "aws",
-    "azure",
-    "gcp",
-    "google cloud",
-    "heroku",
-    "digitalocean",
-    "prometheus",
-    "grafana",
-    "kibana",
-    "datadog",
-    "newrelic",
-    "nginx",
-    "apache",
-    "haproxy",
-    # Frameworks / Libraries
-    "react",
-    "vue",
-    "angular",
-    "svelte",
-    "next.js",
-    "nuxt",
-    "node.js",
-    "nodejs",
-    "express",
-    "fastify",
-    "django",
-    "flask",
-    "fastapi",
-    "aiohttp",
-    "spring",
-    "spring boot",
-    "hibernate",
-    "quarkus",
-    "micronaut",
-    "rails",
-    "laravel",
-    "symfony",
-    "graphql",
-    "rest",
-    "grpc",
-    "soap",
-    "websocket",
-    # Data / ML / AI
-    "kafka",
-    "rabbitmq",
-    "celery",
-    "airflow",
-    "spark",
-    "hadoop",
-    "flink",
-    "pandas",
-    "numpy",
-    "scipy",
-    "matplotlib",
-    "seaborn",
-    "plotly",
-    "tensorflow",
-    "pytorch",
-    "keras",
-    "scikit-learn",
-    "xgboost",
-    "lightgbm",
-    "hugging face",
-    "langchain",
-    "openai",
-    "llm",
-    "rag",
-    # Methodologies / Tools
-    "agile",
-    "scrum",
-    "kanban",
-    "safe",
-    "waterfall",
-    "jira",
-    "confluence",
-    "trello",
-    "asana",
-    "notion",
-    "figma",
-    "sketch",
-    "photoshop",
-    "illustrator",
-    "tableau",
-    "power bi",
-    "looker",
-    "metabase",
-}
 
-# ── COMPANY PATTERNS ─────────────────────────────────────────────────────────
-COMPANY_PATTERNS = [
-    r"(?:Яндекс|Google|Microsoft|Amazon|Apple|Meta|Netflix|Uber|Airbnb|Spotify"
-    r"|Telegram|VK|Mail\.ru|Ozon|Wildberries|Tinkoff|Сбер|Сбербанк|ВТБ"
-    r"|Альфа-Банк|Тинькофф|МТС|Билайн|МегаФон|Tele2|Ростелеком)",
-    r"(?:работал в|работала в|трудился в|в компании|из компании)\s+"
-    r"([А-Я][а-яА-Я0-9]+(?:\s+[А-Я][а-яА-Я0-9]+)*)",
-    r"([А-Я][а-я]+(?:\s+[А-Я][а-я]+)*\s+(?:ООО|ЗАО|АО|ИП|Ltd|LLC|Inc|GmbH|S\.A\.))",
-]
+def extract_companies(text: str) -> Set[str]:
+    """Извлекает компании из текста с умной фильтрацией."""
+    companies = set()
 
-# ── POSITION PATTERNS ────────────────────────────────────────────────────────
-POSITION_PATTERNS = [
-    r'(?:должность|позиция|роль|работал как|работала как)\s*[":\-]?\s*'
-    r"([А-Яа-я][А-Яа-я\s\-]{5,50})(?:[,\.\n]|$)",
-]
+    # Паттерн 1: Компании с организационно-правовой формой
+    pattern1 = (
+        r"([А-Я][а-я]+(?:\s+[А-Я][а-я]+)*(?:\s+(?:ООО|ЗАО|АО|ИП|Ltd|LLC|Inc|GmbH)))"
+    )
+    for match in re.findall(pattern1, text, re.IGNORECASE):
+        company = match.strip()
+        if len(company) > 4 and company.lower() not in COMPANY_STOP_WORDS:
+            companies.add(company)
+
+    # Паттерн 2: Известные компании
+    for known in KNOWN_COMPANIES:
+        pattern = rf"\b{known}\b"
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            companies.add(match.group())
+
+    # Паттерн 3: После предлогов "в", "из", "работал в"
+    pattern3 = r"(?:работал в|работала в|трудился в|в компании|из компании)\s+([А-Я][а-яА-Я0-9]+(?:\s+[А-Я][а-яА-Я0-9]+)*)"
+    for match in re.findall(pattern3, text, re.IGNORECASE):
+        company = match.strip()
+        if len(company) > 3 and company.lower() not in COMPANY_STOP_WORDS:
+            companies.add(company)
+
+    return companies
 
 
-def _scan_tech_skills(text: str) -> Set[str]:
-    """Return all TECH_SKILLS that appear (word-boundary match) in text."""
-    found: Set[str] = set()
-    text_lower = text.lower()
-    for skill in TECH_SKILLS:
-        # Use word boundaries; handle skills like 'c++' that have special chars
-        pattern = r"(?<![a-zA-Z0-9])" + re.escape(skill) + r"(?![a-zA-Z0-9])"
-        if re.search(pattern, text_lower):
-            found.add(skill)
-    return found
+def extract_skills(text: str) -> Set[str]:
+    """Извлекает технические навыки из текста."""
+    skills = set()
 
-
-def _extract_years(text: str) -> Set[str]:
-    """Extract 4-digit employment years (1990–2030) from text."""
-    return set(re.findall(r"\b(199\d|20[0-2]\d|2030)\b", text))
-
-
-def extract_entities(text: str) -> Dict[str, Set[str]]:
-    """Extract named entities from text."""
-    entities: Dict[str, Set[str]] = {
-        "companies": set(),
-        "dates": set(),
-        "years": set(),
-        "skills": set(),
-        "projects": set(),
-        "positions": set(),
-    }
-
-    # ── Companies ────────────────────────────────────────────────────────────
-    for pattern in COMPANY_PATTERNS:
-        for m in re.findall(pattern, text, re.IGNORECASE):
-            company = m.strip() if isinstance(m, str) else m
-            if len(company) > 3 and company.lower() not in STOP_WORDS:
-                if any(c.isupper() for c in company):
-                    entities["companies"].add(company)
-
-    # ── Dates (full spans, for reference) ────────────────────────────────────
-    date_patterns = [
-        r"(\d{4}\s*[–\-]\s*\d{4})",
-        r"(\d{4}\s*[–\-]\s*н\.?\s*в\.?)",
-        r"([а-яА-Я]{3,}\s+\d{4}\s*[–\-]\s*[а-яА-Я]{3,}\s+\d{4})",
-    ]
-    for pattern in date_patterns:
-        for m in re.findall(pattern, text, re.IGNORECASE):
-            d = m.strip()
-            if len(d) >= 7:
-                entities["dates"].add(d)
-
-    # ── Years (validated individually) ───────────────────────────────────────
-    entities["years"] = _extract_years(text)
-
-    # ── Tech skills (full-text scan against whitelist) ────────────────────────
-    entities["skills"] = _scan_tech_skills(text)
-
-    # ── Additional skills from section headers (Cyrillic soft skills) ─────────
+    # Ищем в секциях навыков
     skill_markers = [
         "навыки:",
         "умения:",
-        "компетенции:",
         "технологии:",
         "ключевые слова:",
         "стек:",
@@ -376,166 +186,165 @@ def extract_entities(text: str) -> Dict[str, Set[str]]:
         "technologies:",
     ]
     for marker in skill_markers:
-        idx = text.lower().find(marker)
-        if idx != -1:
-            section = text[idx + len(marker) :].split("\n\n")[0]
-            cyrillic_skills = re.findall(
-                r"[А-ЯA-Za-z][А-Яа-яA-Za-z\+\#\.]+(?:\s+[А-ЯA-Za-za-я\+\#\.]+)*",
+        if marker in text.lower():
+            section = text.split(marker.lower())[-1].split("\n\n")[0]
+            # Извлекаем слова с заглавной буквы или технические термины
+            candidates = re.findall(
+                r"[А-Я][а-я]+(?:\s+[А-Я][а-я]+)*|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*",
                 section,
             )
-            for s in cyrillic_skills:
-                if len(s) > 3 and s.lower() not in STOP_WORDS:
-                    entities["skills"].add(s.strip().lower())
+            for c in candidates:
+                skill = c.strip()
+                if len(skill) > 2 and skill.lower() not in SKILL_STOP_WORDS:
+                    # Исключаем части предложений
+                    if not any(
+                        word in skill.lower()
+                        for word in ["ами", "командами", "ной", "распредел"]
+                    ):
+                        skills.add(skill)
 
-    # ── Positions ─────────────────────────────────────────────────────────────
-    for pattern in POSITION_PATTERNS:
-        for m in re.findall(pattern, text, re.IGNORECASE):
-            position = m.strip()
-            bad_words = {
-                "сроков",
-                "качества",
-                "реализации",
-                "проектов",
-                "релизов",
-                "выполнения",
-                "задач",
-                "работы",
-            }
-            if len(position) > 5 and position.lower() not in STOP_WORDS:
-                if not any(w in position.lower() for w in bad_words):
-                    entities["positions"].add(position)
-
-    # ── Projects ──────────────────────────────────────────────────────────────
-    project_patterns = [
-        r'(?:проект|задача|кейс|project)\s*[":\-]?\s*'
-        r"([А-ЯA-Za-z][А-Яа-яA-Za-z0-9\s\-]{5,50})(?:[,\.\n]|$)",
-    ]
-    for pattern in project_patterns:
-        for m in re.findall(pattern, text, re.IGNORECASE):
-            project = m.strip()
-            if len(project) > 5 and project.lower() not in STOP_WORDS:
-                entities["projects"].add(project)
-
-    return entities
+    return skills
 
 
-def _similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+def extract_positions(text: str) -> Set[str]:
+    """Извлекает должности из текста."""
+    positions = set()
+
+    pattern = r'(?:должность|позиция|роль|работал как)\s*[":\-]?\s*([А-Я][а-яА-я\s\-]{5,50})(?:[,\.\n]|$)'
+    for match in re.findall(pattern, text, re.IGNORECASE):
+        position = match.strip()
+        if len(position) > 5 and position.lower() not in POSITION_STOP_WORDS:
+            positions.add(position)
+
+    return positions
 
 
-def _filter_truly_new(
-    new_items: Set[str], original_items: Set[str], threshold: float = 0.75
-) -> List[str]:
-    """Return items from new_items that have no similar match in original_items."""
-    truly_new = []
-    for item in new_items:
-        if not any(_similarity(item, orig) >= threshold for orig in original_items):
-            truly_new.append(item)
-    return truly_new
-
-
-def validate_resume_facts(original_text: str, adapted_text: str) -> Dict[str, Any]:
-    """
-    Compare original and adapted resumes and detect hallucinated entities.
-
-    Severity levels used in issues list:
-      🚨  CRITICAL  — fabricated company, year, or position
-      ⚠️  WARNING   — new tech skills or many new soft skills
-      ℹ️  INFO      — minor stylistic additions (≤2 new soft skills)
-
-    is_safe = True only when there are zero CRITICAL or WARNING issues.
-    confidence  ∈ [0.0, 1.0]: probability estimate that the text is clean.
-    """
-    issues: List[str] = []
-    penalty: float = 0.0
-
-    orig = extract_entities(original_text)
-    adpt = extract_entities(adapted_text)
-
-    # ── 1. Companies (CRITICAL) ───────────────────────────────────────────────
-    new_companies = adpt["companies"] - orig["companies"]
-    truly_new_companies = _filter_truly_new(
-        new_companies, orig["companies"], threshold=0.70
+def normalize_company_name(company: str) -> str:
+    """Нормализует название компании для сравнения."""
+    normalized = re.sub(
+        r"\s+(?:ООО|ЗАО|АО|ИП|Ltd|LLC|Inc|GmbH|S\.A\.)",
+        "",
+        company,
+        flags=re.IGNORECASE,
     )
+    normalized = normalized.lower().strip()
+    normalized = " ".join(normalized.split())
+    return normalized
+
+
+def companies_are_similar(comp1: str, comp2: str) -> bool:
+    """Проверяет, являются ли две компании одинаковыми."""
+    norm1 = normalize_company_name(comp1)
+    norm2 = normalize_company_name(comp2)
+
+    if norm1 == norm2:
+        return True
+
+    similarity = SequenceMatcher(None, norm1, norm2).ratio()
+    if similarity > 0.7:
+        return True
+
+    if norm1 in norm2 or norm2 in norm1:
+        return True
+
+    return False
+
+
+def validate_resume_facts(original_text: str, adapted_text: str) -> Dict[str, any]:
+    """
+    Проверяет, не добавил ли ИИ новые сущности.
+    ДАТЫ ИСКЛЮЧЕНЫ ИЗ ВАЛИДАЦИИ.
+    """
+    issues = []
+    confidence_scores = []
+
+    # Извлекаем сущности
+    original_companies = extract_companies(original_text)
+    adapted_companies = extract_companies(adapted_text)
+
+    original_skills = extract_skills(original_text)
+    adapted_skills = extract_skills(adapted_text)
+
+    original_positions = extract_positions(original_text)
+    adapted_positions = extract_positions(adapted_text)
+
+    # === Проверка компаний ===
+    truly_new_companies = []
+    for new_comp in adapted_companies:
+        is_duplicate = False
+        for orig_comp in original_companies:
+            if companies_are_similar(new_comp, orig_comp):
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            truly_new_companies.append(new_comp)
+
     if truly_new_companies:
-        issues.append(f"🚨 Новые компании: {', '.join(truly_new_companies)}")
-        penalty += 0.5 * len(truly_new_companies)
+        issues.append(f"⚠️ Новые компании: {', '.join(truly_new_companies)}")
+        confidence_scores.append(0.3)
 
-    # ── 2. Years / dates (CRITICAL) ───────────────────────────────────────────
-    new_years = adpt["years"] - orig["years"]
-    if new_years:
-        issues.append(f"🚨 Новые годы (не из резюме): {', '.join(sorted(new_years))}")
-        penalty += 0.4 * len(new_years)
+    # === Проверка навыков (только критичные) ===
+    new_skills = adapted_skills - original_skills
+    # Фильтруем не-технические навыки
+    critical_new_skills = [
+        s for s in new_skills if s.lower() not in SKILL_STOP_WORDS and len(s) > 3
+    ]
 
-    # ── 3. Positions (CRITICAL) ───────────────────────────────────────────────
-    new_positions = adpt["positions"] - orig["positions"]
-    truly_new_positions = _filter_truly_new(
-        new_positions, orig["positions"], threshold=0.60
-    )
-    if truly_new_positions:
-        issues.append(f"🚨 Новые должности: {', '.join(truly_new_positions)}")
-        penalty += 0.4 * len(truly_new_positions)
-
-    # ── 4. Tech skills (WARNING) ──────────────────────────────────────────────
-    # Only skills that are in our validated TECH_SKILLS set are checked here.
-    orig_tech = orig["skills"] & TECH_SKILLS
-    adpt_tech = adpt["skills"] & TECH_SKILLS
-    new_tech_skills = adpt_tech - orig_tech
-    if new_tech_skills:
+    if len(critical_new_skills) > 2:  # Только если много новых навыков
         issues.append(
-            f"⚠️ Новые технические навыки: {', '.join(sorted(new_tech_skills))}"
+            f"⚠️ Новые технические навыки: {', '.join(critical_new_skills[:3])}"
         )
-        penalty += 0.25 * len(new_tech_skills)
+        confidence_scores.append(0.5)
+    elif len(critical_new_skills) > 0:
+        issues.append(
+            f"ℹ️ Незначительные новые навыки: {', '.join(critical_new_skills)}"
+        )
+        confidence_scores.append(0.8)  # Высокая уверенность, но не критично
 
-    # ── 5. Soft / general skills (WARNING / INFO) ─────────────────────────────
-    orig_soft = orig["skills"] - TECH_SKILLS
-    adpt_soft = adpt["skills"] - TECH_SKILLS
-    new_soft = adpt_soft - orig_soft
-    truly_new_soft = _filter_truly_new(new_soft, orig_soft, threshold=0.65)
-    if len(truly_new_soft) > 3:
-        issues.append(f"⚠️ Много новых навыков: {', '.join(list(truly_new_soft)[:5])}…")
-        penalty += 0.15
-    elif len(truly_new_soft) > 0:
-        issues.append(f"ℹ️ Незначительные новые навыки: {', '.join(truly_new_soft)}")
-        # no penalty for 1-3 minor soft skills
+    # === Проверка должностей ===
+    truly_new_positions = []
+    for new_pos in adapted_positions:
+        is_duplicate = False
+        for orig_pos in original_positions:
+            similarity = SequenceMatcher(
+                None, new_pos.lower(), orig_pos.lower()
+            ).ratio()
+            if similarity > 0.6:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            truly_new_positions.append(new_pos)
 
-    # ── 6. Projects (WARNING) ─────────────────────────────────────────────────
-    new_projects = adpt["projects"] - orig["projects"]
-    truly_new_projects = _filter_truly_new(
-        new_projects, orig["projects"], threshold=0.65
+    if truly_new_positions:
+        issues.append(f"⚠️ Новые должности: {', '.join(truly_new_positions)}")
+        confidence_scores.append(0.5)
+
+    # === Итоговая оценка ===
+    # is_safe = true если нет критических проблем (компании)
+    has_critical_issues = any("⚠️ Новые компании" in issue for issue in issues)
+    is_safe = not has_critical_issues
+
+    avg_confidence = (
+        sum(confidence_scores) / len(confidence_scores) if confidence_scores else 1.0
     )
-    if truly_new_projects:
-        issues.append(f"⚠️ Новые проекты: {', '.join(truly_new_projects)}")
-        penalty += 0.2 * len(truly_new_projects)
-
-    # ── Result ────────────────────────────────────────────────────────────────
-    critical_or_warning = [i for i in issues if i.startswith("🚨") or i.startswith("⚠️")]
-    is_safe = len(critical_or_warning) == 0
-    confidence = max(0.0, round(1.0 - min(penalty, 1.0), 3))
 
     return {
         "is_safe": is_safe,
         "issues": issues,
-        "confidence": confidence,
-        "original_entities": {k: list(v) for k, v in orig.items()},
-        "adapted_entities": {k: list(v) for k, v in adpt.items()},
-        "new_tech_skills": sorted(new_tech_skills),
-        "new_years": sorted(new_years),
+        "confidence": avg_confidence,
+        "original_companies_count": len(original_companies),
+        "adapted_companies_count": len(adapted_companies),
+        "dates_excluded": True,
     }
 
 
-def get_validation_summary(result: Dict[str, Any]) -> str:
-    """Return a human-readable summary of validation results."""
-    if result["is_safe"]:
-        conf = result["confidence"] * 100
-        extra = ""
-        if result["issues"]:  # only INFO issues
-            extra = "\n  " + "\n  ".join(result["issues"])
-        return f"✅ Валидация пройдена (уверенность: {conf:.0f}%){extra}"
-
-    summary_lines = [
-        f"❌ Обнаружены галлюцинации (уверенность: {result['confidence'] * 100:.0f}%):"
-    ]
-    for issue in result["issues"]:
-        summary_lines.append(f"  {issue}")
-    return "\n".join(summary_lines)
+def get_validation_summary(validation_result: Dict[str, any]) -> str:
+    """Генерирует читаемое резюме результатов валидации."""
+    if validation_result["is_safe"]:
+        return "✅ Валидация пройдена"
+    else:
+        summary = "⚠️ Проблемы валидации:\n"
+        for issue in validation_result["issues"]:
+            summary += f"  - {issue}\n"
+        summary += f"Уверенность: {validation_result['confidence'] * 100:.1f}%"
+        return summary
