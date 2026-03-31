@@ -3,6 +3,7 @@ modules = ["python-3.11"]
 
 [nix]
 channel = "stable-25_05"
+packages = ["lsof", "psmisc"]
 
 [unitTest]
 language = "python3"
@@ -45,9 +46,14 @@ outputType = "webview"
 localPort = 5000
 externalPort = 80
 
+[[ports]]
+localPort = 5001
+externalPort = 3000
+
 [userenv]
 
 [userenv.shared]
 VK_GROUP_ID = "237022345"
 PORT = "5000"
 LOG_LEVEL = "INFO"
+VK_CONFIRMATION_TOKEN = "7a79597e"

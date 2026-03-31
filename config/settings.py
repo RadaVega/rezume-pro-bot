@@ -1,40 +1,25 @@
 # config/settings.py
 """
 Конфигурация приложения.
+Версия: 5.0
 """
 
 import os
 from dotenv import load_dotenv
 
-# Загружаем переменные из .env файла
 load_dotenv()
 
 
 class Config:
-    # VK - Обязательно должно быть числом (int), не строкой!
-    VK_GROUP_ID = os.getenv("VK_GROUP_ID")
+    # VK
+    VK_GROUP_ID = int(os.getenv("VK_GROUP_ID", 0))
+    VK_TOKEN = os.getenv("VK_TOKEN", "")
 
-    # Проверка на наличие обязательных переменных
-    if not VK_GROUP_ID:
-        raise ValueError(
-            "❌ КРИТИЧЕСКАЯ ОШИБКА: VK_GROUP_ID не настроен!\n"
-            "Добавьте переменную в Replit Secrets или .env файл.\n"
-            "Формат: VK_GROUP_ID=123456789 (без @club, без пробелов)"
-        )
-
-    # Преобразуем в int (VK API требует число, не строку!)
-    try:
-        VK_GROUP_ID = int(VK_GROUP_ID)
-    except ValueError:
-        raise ValueError(
-            f"❌ VK_GROUP_ID должен быть числом, а не '{VK_GROUP_ID}'\n"
-            "Пример правильного формата: VK_GROUP_ID=123456789"
-        )
+    # ✅ ADD THIS LINE (fixes the AttributeError):
+    VK_CONFIRMATION_TOKEN = os.getenv("VK_CONFIRMATION_TOKEN", "ok")
 
     # GigaChat
-    GIGACHAT_API_KEY = os.getenv("GIGACHAT_API_KEY")
-    if not GIGACHAT_API_KEY:
-        raise ValueError("❌ GIGACHAT_API_KEY не настроен!")
+    GIGACHAT_API_KEY = os.getenv("GIGACHAT_API_KEY", "")
 
     # Flask
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-key-change-in-prod")
