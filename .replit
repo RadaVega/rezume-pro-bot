@@ -48,3 +48,6 @@ externalPort = 80
 [userenv]
 
 [userenv.shared]
+VK_GROUP_ID = "237022345"
+PORT = "5000"
+LOG_LEVEL = "INFO"

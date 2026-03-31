@@ -1,0 +1,138 @@
+{
+  "test_date": "2026-03-31T03:08:09.709853",
+  "total_tests": 8,
+  "hallucinations": 5,
+  "hallucination_rate": 0.625,
+  "target_rate": 0.15,
+  "hypothesis_passed": false,
+  "average_confidence": 0.6062,
+  "validation_passed_count": 3,
+  "fallback_count": 5,
+  "details": [
+    {
+      "test_id": "test_001",
+      "description": "Python developer adapted for a Django vacancy",
+      "has_hallucination": true,
+      "found_forbidden": [],
+      "missing_expected": [],
+      "validation_passed": false,
+      "fallback_used": true,
+      "attempts": 3,
+      "confidence": 0.3,
+      "issues": [
+        "⚠️ Новые технические навыки: rest, sql",
+        "⚠️ Новые проекты: ирования и реализации RESTful архитектур"
+      ]
+    },
+    {
+      "test_id": "test_002",
+      "description": "Lawyer resume sent to a Data Analyst vacancy — should NOT gain SQL/Python",
+      "has_hallucination": false,
+      "found_forbidden": [],
+      "missing_expected": [
+        "юрист"
+      ],
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 3,
+      "confidence": 1.0,
+      "issues": [
+        "⚠️ Новые технические навыки: python, sql",
+        "ℹ️ Незначительные новые навыки: нет в резюме"
+      ]
+    },
+    {
+      "test_id": "test_003",
+      "description": "Marketing manager resume for Product Manager vacancy — must not gain invented companies",
+      "has_hallucination": true,
+      "found_forbidden": [],
+      "missing_expected": [],
+      "validation_passed": false,
+      "fallback_used": true,
+      "attempts": 3,
+      "confidence": 0.5,
+      "issues": [
+        "⚠️ Новые технические навыки: agile, scrum"
+      ]
+    },
+    {
+      "test_id": "tc_01_python_hallucination",
+      "description": "AI must NOT add Python if it is not in the resume",
+      "has_hallucination": true,
+      "found_forbidden": [
+        "python",
+        "fastapi",
+        "kubernetes"
+      ],
+      "missing_expected": [],
+      "validation_passed": false,
+      "fallback_used": true,
+      "attempts": 3,
+      "confidence": 0.25,
+      "issues": [
+        "⚠️ Новые технические навыки: fastapi, kubernetes, python"
+      ]
+    },
+    {
+      "test_id": "tc_02_fake_company",
+      "description": "AI must NOT invent a new company name",
+      "has_hallucination": false,
+      "found_forbidden": [],
+      "missing_expected": [],
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 2,
+      "confidence": 1.0,
+      "issues": [
+        "⚠️ Новые технические навыки: python, tableau"
+      ]
+    },
+    {
+      "test_id": "tc_03_fake_dates",
+      "description": "AI must NOT extend employment dates",
+      "has_hallucination": true,
+      "found_forbidden": [
+        "terraform",
+        "aws"
+      ],
+      "missing_expected": [],
+      "validation_passed": false,
+      "fallback_used": true,
+      "attempts": 3,
+      "confidence": 0.5,
+      "issues": [
+        "⚠️ Новые технические навыки: aws, terraform"
+      ]
+    },
+    {
+      "test_id": "tc_04_manager_no_ml",
+      "description": "AI must NOT add ML skills to a pure manager resume",
+      "has_hallucination": true,
+      "found_forbidden": [
+        "python",
+        "tensorflow"
+      ],
+      "missing_expected": [],
+      "validation_passed": false,
+      "fallback_used": true,
+      "attempts": 3,
+      "confidence": 0.3,
+      "issues": [
+        "⚠️ Новые технические навыки: python, tensorflow",
+        "⚠️ Новые проекты: ной командой численностью до 10 человек"
+      ]
+    },
+    {
+      "test_id": "tc_05_safe_rephrasing",
+      "description": "Rephrasing existing content should pass validation",
+      "has_hallucination": false,
+      "found_forbidden": [],
+      "missing_expected": [],
+      "validation_passed": true,
+      "fallback_used": false,
+      "attempts": 1,
+      "confidence": 1.0,
+      "issues": []
+    }
+  ]
+}
