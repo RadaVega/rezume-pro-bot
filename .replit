@@ -2,12 +2,8 @@ language = "python3"
 
 [deployment]
 build = ["bash", "/home/runner/workspace/build.sh"]
-run = ["sh", "-c", "PYTHONPATH=/home/runner/workspace/.pkgs python3 /home/runner/workspace/main.py"]
+run = ["python3", "/home/runner/workspace/main.py"]
 deploymentTarget = "cloudrun"
-
-[[deployment.env]]
-name = "VK_GROUP_ID"
-value = "237022345"
 
 [agent]
 expertMode = true

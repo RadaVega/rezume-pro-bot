@@ -1,9 +1,16 @@
 #!/bin/bash
 set -e
+echo "📦 Installing dependencies to .pkgs/..."
+
+# Install packages to .pkgs directory
 pip install --target /home/runner/workspace/.pkgs -r requirements.txt
-.pkgs/bin/python3 -c "import requests, flask; print('OK')" 2>/dev/null || python3 -c "
+
+# Verify installation using system Python with .pkgs in path
+python3 -c "
 import sys
 sys.path.insert(0, '/home/runner/workspace/.pkgs')
-import requests, flask, gigachat
-print('OK')
+import requests, flask, gigachat, vk_api
+print('✅ All core packages OK')
 "
+
+echo "✅ Build complete"

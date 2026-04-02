@@ -11,6 +11,15 @@ Conversation flow:
   /help                     → instructions
 """
 
+# ── Package path: .pkgs/ is pre-installed during the Build stage ──────────────
+# The [deployment] build command in .replit runs:
+#   pip install --target .pkgs/ ...
+# We add it to sys.path here so imports work regardless of PYTHONPATH env var.
+import sys as _sys, os as _os
+_PKGS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".pkgs")
+if _os.path.isdir(_PKGS) and _PKGS not in _sys.path:
+    _sys.path.insert(0, _PKGS)
+# ─────────────────────────────────────────────────────────────────────────────
 
 import os
 import re
@@ -60,9 +69,8 @@ logger.info("✅ Bot ready. Group: %s", Config.VK_GROUP_ID)
 # Prevents double-delivery when VK retries a webhook call.
 # Does NOT deduplicate commands — /start always works.
 _seen_msg_ids: OrderedDict = OrderedDict()
-_MSG_TTL = 60  # seconds — VK retries arrive within a few seconds
+_MSG_TTL = 60          # seconds — VK retries arrive within a few seconds
 _MSG_CACHE_MAX = 2000
-
 
 def _is_duplicate_message(message_id: int) -> bool:
     """Return True if this VK message_id was already processed."""
@@ -79,13 +87,11 @@ def _is_duplicate_message(message_id: int) -> bool:
         _seen_msg_ids.popitem(last=False)
     return False
 
-
 # ── User session store ────────────────────────────────────────────────────────
 # { user_id: { resume_text, resume_filename, state, updated_at } }
 # state: "waiting_resume" | "waiting_vacancy" | "processing"
 _sessions: dict = {}
 _SESSION_TTL = 3600  # 1 hour
-
 
 def _session(user_id: int) -> dict:
     now = time.time()
@@ -101,30 +107,23 @@ def _session(user_id: int) -> dict:
     }
     return _sessions[user_id]
 
-
 def _touch(user_id: int) -> None:
     if user_id in _sessions:
         _sessions[user_id]["updated_at"] = time.time()
 
-
 def _clear_session(user_id: int) -> None:
     _sessions.pop(user_id, None)
-
 
 def _session_cleanup() -> None:
     while True:
         time.sleep(600)
         now = time.time()
-        expired = [
-            uid
-            for uid, s in list(_sessions.items())
-            if now - s.get("updated_at", 0) > _SESSION_TTL
-        ]
+        expired = [uid for uid, s in list(_sessions.items())
+                   if now - s.get("updated_at", 0) > _SESSION_TTL]
         for uid in expired:
             _sessions.pop(uid, None)
         if expired:
             logger.debug("🧹 Cleaned %d expired sessions", len(expired))
-
 
 # ── Static messages ───────────────────────────────────────────────────────────
 GREETING = (
@@ -171,7 +170,6 @@ DEMO = (
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
 
 def send(user_id: int, text: str) -> bool:
     """
@@ -232,7 +230,6 @@ def ats_score(confidence: float) -> int:
 
 # ── Core conversation handler ─────────────────────────────────────────────────
 
-
 def handle(user_id: int, text: str, attachments: list) -> None:
     """Dispatch incoming message to the right handler."""
     s = _session(user_id)
@@ -269,10 +266,9 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         fname = info.get("title", info.get("filename", "файл"))
 
         if ext not in ("pdf", "docx", "doc"):
-            send(
-                user_id,
-                "❌ Неподдерживаемый формат.\nОтправь резюме в формате PDF или DOCX.",
-            )
+            send(user_id,
+                 "❌ Неподдерживаемый формат.\n"
+                 "Отправь резюме в формате PDF или DOCX.")
             return
 
         send(user_id, f"⏳ Читаю файл {fname}...")
@@ -289,11 +285,9 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             pass
 
         if not resume_text or len(resume_text) < 50:
-            send(
-                user_id,
-                "❌ Не удалось извлечь текст.\n"
-                "Убедись, что PDF не отсканирован, или используй DOCX.",
-            )
+            send(user_id,
+                 "❌ Не удалось извлечь текст.\n"
+                 "Убедись, что PDF не отсканирован, или используй DOCX.")
             return
 
         s["resume_text"] = resume_text
@@ -301,37 +295,31 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         s["state"] = "waiting_vacancy"
         _touch(user_id)
 
-        logger.info(
-            "📄 Resume loaded for user %s: %s (%d chars)",
-            user_id,
-            fname,
-            len(resume_text),
-        )
-        send(
-            user_id,
-            f"✅ Резюме получено: {fname}\n\n"
-            "Теперь пришли ссылку на вакансию с hh.ru\n"
-            "Пример: https://hh.ru/vacancy/12345678\n\n"
-            "💡 После адаптации можно прислать другую ссылку — "
-            "резюме останется в памяти!",
-        )
+        logger.info("📄 Resume loaded for user %s: %s (%d chars)",
+                    user_id, fname, len(resume_text))
+        send(user_id,
+             f"✅ Резюме получено: {fname}\n\n"
+             "Теперь пришли ссылку на вакансию с hh.ru\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "💡 После адаптации можно прислать другую ссылку — "
+             "резюме останется в памяти!")
         return
 
     # ── HH.ru vacancy link ────────────────────────────────────────────────────
     hh_url = extract_hh_url(text)
     if hh_url:
         if not s.get("resume_text"):
-            send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX).")
+            send(user_id,
+                 "📎 Сначала отправь файл резюме (PDF или DOCX).")
             return
 
         if s.get("state") == "processing":
             send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
             return
 
-        send(
-            user_id,
-            "⏳ Анализирую вакансию и адаптирую резюме...\nЭто займёт около 30 секунд.",
-        )
+        send(user_id,
+             "⏳ Анализирую вакансию и адаптирую резюме...\n"
+             "Это займёт около 30 секунд.")
 
         s["state"] = "processing"
         _touch(user_id)
@@ -340,15 +328,10 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         def _process():
             try:
                 vacancy_text = parse_hh_vacancy(hh_url)
-                if (
-                    vacancy_text.startswith("Error:")
-                    or vacancy_text == "Invalid HH.ru URL"
-                ):
-                    send(
-                        user_id,
-                        f"❌ Не удалось получить вакансию.\n{vacancy_text}\n\n"
-                        "Проверь ссылку — она должна быть вида hh.ru/vacancy/12345678",
-                    )
+                if vacancy_text.startswith("Error:") or vacancy_text == "Invalid HH.ru URL":
+                    send(user_id,
+                         f"❌ Не удалось получить вакансию.\n{vacancy_text}\n\n"
+                         "Проверь ссылку — она должна быть вида hh.ru/vacancy/12345678")
                     s["state"] = "waiting_vacancy"
                     return
 
@@ -365,14 +348,15 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                         "Возвращаем оригинал без изменений.\n\n"
                     )
                 else:
-                    header = f"✅ Резюме адаптировано!\n📊 Match Score: {score}/100\n\n"
+                    header = (
+                        f"✅ Резюме адаптировано!\n"
+                        f"📊 Match Score: {score}/100\n\n"
+                    )
 
                 body = header + adapted_clean
 
                 # Append soft info notes if any
-                info_notes = [
-                    i for i in metadata.get("issues", []) if i.startswith("ℹ️")
-                ]
+                info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
                 if info_notes:
                     body += "\n\n" + "\n".join(info_notes)
 
@@ -382,19 +366,13 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                 s["state"] = "waiting_vacancy"
                 _touch(user_id)
 
-                send(
-                    user_id,
-                    "💡 Хочешь проверить другую вакансию? "
-                    "Просто пришли новую ссылку — резюме сохранено 📎\n"
-                    "Для нового резюме отправь /reset",
-                )
+                send(user_id,
+                     "💡 Хочешь проверить другую вакансию? "
+                     "Просто пришли новую ссылку — резюме сохранено 📎\n"
+                     "Для нового резюме отправь /reset")
 
-                logger.info(
-                    "✅ Done for user %s | score=%d | fallback=%s",
-                    user_id,
-                    score,
-                    metadata.get("fallback_used"),
-                )
+                logger.info("✅ Done for user %s | score=%d | fallback=%s",
+                            user_id, score, metadata.get("fallback_used"))
 
             except Exception as e:
                 logger.exception("❌ _process() error for user %s: %s", user_id, e)
@@ -407,12 +385,10 @@ def handle(user_id: int, text: str, attachments: list) -> None:
     # ── Fallthrough: unrecognised input ───────────────────────────────────────
     state = s.get("state", "waiting_resume")
     if state == "waiting_vacancy":
-        send(
-            user_id,
-            "🔗 Жду ссылку на вакансию с hh.ru\n"
-            "Пример: https://hh.ru/vacancy/12345678\n\n"
-            "Или /reset чтобы загрузить другое резюме.",
-        )
+        send(user_id,
+             "🔗 Жду ссылку на вакансию с hh.ru\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "Или /reset чтобы загрузить другое резюме.")
     elif state == "processing":
         send(user_id, "⏳ Ещё обрабатываю запрос, подожди немного...")
     else:
@@ -421,16 +397,14 @@ def handle(user_id: int, text: str, attachments: list) -> None:
 
 # ── Flask routes ──────────────────────────────────────────────────────────────
 
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json or {}
 
     # VK confirmation handshake
     if data.get("type") == "confirmation":
-        token = getattr(Config, "VK_CONFIRMATION_TOKEN", None) or os.getenv(
-            "VK_CONFIRMATION_TOKEN", "ok"
-        )
+        token = (getattr(Config, "VK_CONFIRMATION_TOKEN", None)
+                 or os.getenv("VK_CONFIRMATION_TOKEN", "ok"))
         return str(token)
 
     if data.get("type") != "message_new":
@@ -448,18 +422,11 @@ def webhook():
 
     # Deduplicate only by VK message_id (handles VK retry storms)
     if _is_duplicate_message(message_id):
-        logger.debug(
-            "⏭️ Duplicate msg_id=%s from user %s — skipped", message_id, user_id
-        )
+        logger.debug("⏭️ Duplicate msg_id=%s from user %s — skipped", message_id, user_id)
         return jsonify({"status": "ok"})
 
-    logger.info(
-        "📨 user=%s msg_id=%s text='%.60s' attachments=%d",
-        user_id,
-        message_id,
-        text,
-        len(attachments),
-    )
+    logger.info("📨 user=%s msg_id=%s text='%.60s' attachments=%d",
+                user_id, message_id, text, len(attachments))
 
     try:
         handle(user_id, text, attachments)
@@ -472,15 +439,13 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify(
-        {
-            "status": "healthy",
-            "version": "5.3.0",
-            "vk_group_id": Config.VK_GROUP_ID,
-            "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
-            "active_sessions": len(_sessions),
-        }
-    )
+    return jsonify({
+        "status": "healthy",
+        "version": "5.3.0",
+        "vk_group_id": Config.VK_GROUP_ID,
+        "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
+        "active_sessions": len(_sessions),
+    })
 
 
 @app.route("/validate", methods=["POST"])
@@ -493,7 +458,6 @@ def validate_endpoint():
         return jsonify({"error": "original and adapted fields are required"}), 400
 
     from utils.validation import validate_resume_facts
-
     result = validate_resume_facts(original, adapted)
     result["summary"] = get_validation_summary(result)
     for key in ("original_entities", "adapted_entities"):
