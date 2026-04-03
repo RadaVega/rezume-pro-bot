@@ -175,3 +175,4 @@ uv.lock
 pyproject.toml
 main.py.backup
 generated-icon.png
+.pkgs/
