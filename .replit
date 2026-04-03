@@ -7,3 +7,7 @@ deploymentTarget = "cloudrun"
 
 [agent]
 expertMode = true
+
+# Explicitly declare port 5000
+[ports]
+5000 = { visibility = "public", description = "Flask webhook server" }

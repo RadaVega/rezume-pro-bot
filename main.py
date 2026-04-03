@@ -231,11 +231,115 @@ def ats_score(confidence: float) -> int:
 # ── Core conversation handler ─────────────────────────────────────────────────
 
 def handle(user_id: int, text: str, attachments: list) -> None:
-    """Dispatch incoming message to the right handler."""
+    """Dispatch incoming message to the right handler.
+    Order: attachments → HH link → commands → fallthrough.
+    Attachments MUST be first: user sends a file with empty text,
+    which would otherwise match the '' greeting trigger.
+    """
     s = _session(user_id)
     cmd = text.lower().strip()
 
-    # ── Always-respond commands ───────────────────────────────────────────────
+    # ── 1. File attachment (PDF / DOCX) ───────────────────────────────────────
+    doc = next((a for a in attachments if a.get("type") == "doc"), None)
+    if doc:
+        info = doc["doc"]
+        ext = info.get("ext", "").lower()
+        fname = info.get("title", info.get("filename", "файл"))
+
+        if ext not in ("pdf", "docx", "doc"):
+            send(user_id,
+                 "❌ Неподдерживаемый формат.\n"
+                 "Отправь резюме в формате PDF или DOCX.")
+            return
+
+        send(user_id, f"⏳ Читаю файл {fname}...")
+        path = download_file(info["url"], ext)
+        if not path:
+            send(user_id, "❌ Не удалось загрузить файл. Попробуй ещё раз.")
+            return
+
+        resume_text = extract_text_from_file(path, ext)
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+        if not resume_text or len(resume_text) < 50:
+            send(user_id,
+                 "❌ Не удалось извлечь текст.\n"
+                 "Убедись, что PDF не отсканирован, или используй DOCX.")
+            return
+
+        s["resume_text"] = resume_text
+        s["resume_filename"] = fname
+        s["state"] = "waiting_vacancy"
+        _touch(user_id)
+        logger.info("📄 Resume loaded for user %s: %s (%d chars)", user_id, fname, len(resume_text))
+        send(user_id,
+             f"✅ Резюме получено: {fname}\n\n"
+             "Теперь пришли ссылку на вакансию с hh.ru\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "💡 После адаптации можно прислать другую ссылку — резюме останется в памяти!")
+        return
+
+    # ── 2. HH.ru vacancy link ─────────────────────────────────────────────────
+    hh_url = extract_hh_url(text)
+    if hh_url:
+        if not s.get("resume_text"):
+            send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX).")
+            return
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+
+        send(user_id, "⏳ Анализирую вакансию и адаптирую резюме...\nЭто займёт около 30 секунд.")
+        s["state"] = "processing"
+        _touch(user_id)
+
+        def _process():
+            try:
+                vacancy_text = parse_hh_vacancy(hh_url)
+                if vacancy_text.startswith("Error:") or vacancy_text == "Invalid HH.ru URL":
+                    send(user_id,
+                         f"❌ Не удалось получить вакансию.\n{vacancy_text}\n\n"
+                         "Проверь ссылку — она должна быть вида hh.ru/vacancy/12345678")
+                    s["state"] = "waiting_vacancy"
+                    return
+
+                adapted, metadata = generator.generate_safe_resume(s["resume_text"], vacancy_text)
+                adapted_clean = clean_markdown(adapted)
+                conf = metadata.get("validation", {}).get("confidence", 1.0)
+                score = ats_score(conf)
+
+                if metadata.get("fallback_used"):
+                    header = "⚠️ Не удалось безопасно адаптировать резюме.\nВозвращаем оригинал без изменений.\n\n"
+                else:
+                    header = f"✅ Резюме адаптировано!\n📊 Match Score: {score}/100\n\n"
+
+                body = header + adapted_clean
+                info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
+                if info_notes:
+                    body += "\n\n" + "\n".join(info_notes)
+
+                send(user_id, body)
+                s["state"] = "waiting_vacancy"
+                _touch(user_id)
+                send(user_id,
+                     "💡 Хочешь проверить другую вакансию? "
+                     "Просто пришли новую ссылку — резюме сохранено 📎\n"
+                     "Для нового резюме отправь /reset")
+                logger.info("✅ Done for user %s | score=%d | fallback=%s",
+                            user_id, score, metadata.get("fallback_used"))
+
+            except Exception as e:
+                logger.exception("❌ _process() error for user %s: %s", user_id, e)
+                send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
+                s["state"] = "waiting_vacancy"
+
+        threading.Thread(target=_process, daemon=True).start()
+        return
+
+    # ── 3. Commands ───────────────────────────────────────────────────────────
     if cmd in ("/start", "start", "начать", "привет", "hi", "hello", ""):
         _clear_session(user_id)
         send(user_id, GREETING)
@@ -258,131 +362,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         send(user_id, f"✅ Бот работает! Версия 5.3\nАктивных сессий: {len(_sessions)}")
         return
 
-    # ── File attachment: PDF / DOCX ───────────────────────────────────────────
-    doc = next((a for a in attachments if a.get("type") == "doc"), None)
-    if doc:
-        info = doc["doc"]
-        ext = info.get("ext", "").lower()
-        fname = info.get("title", info.get("filename", "файл"))
-
-        if ext not in ("pdf", "docx", "doc"):
-            send(user_id,
-                 "❌ Неподдерживаемый формат.\n"
-                 "Отправь резюме в формате PDF или DOCX.")
-            return
-
-        send(user_id, f"⏳ Читаю файл {fname}...")
-
-        path = download_file(info["url"], ext)
-        if not path:
-            send(user_id, "❌ Не удалось загрузить файл. Попробуй ещё раз.")
-            return
-
-        resume_text = extract_text_from_file(path, ext)
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
-
-        if not resume_text or len(resume_text) < 50:
-            send(user_id,
-                 "❌ Не удалось извлечь текст.\n"
-                 "Убедись, что PDF не отсканирован, или используй DOCX.")
-            return
-
-        s["resume_text"] = resume_text
-        s["resume_filename"] = fname
-        s["state"] = "waiting_vacancy"
-        _touch(user_id)
-
-        logger.info("📄 Resume loaded for user %s: %s (%d chars)",
-                    user_id, fname, len(resume_text))
-        send(user_id,
-             f"✅ Резюме получено: {fname}\n\n"
-             "Теперь пришли ссылку на вакансию с hh.ru\n"
-             "Пример: https://hh.ru/vacancy/12345678\n\n"
-             "💡 После адаптации можно прислать другую ссылку — "
-             "резюме останется в памяти!")
-        return
-
-    # ── HH.ru vacancy link ────────────────────────────────────────────────────
-    hh_url = extract_hh_url(text)
-    if hh_url:
-        if not s.get("resume_text"):
-            send(user_id,
-                 "📎 Сначала отправь файл резюме (PDF или DOCX).")
-            return
-
-        if s.get("state") == "processing":
-            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
-            return
-
-        send(user_id,
-             "⏳ Анализирую вакансию и адаптирую резюме...\n"
-             "Это займёт около 30 секунд.")
-
-        s["state"] = "processing"
-        _touch(user_id)
-
-        # Run in background so webhook returns 200 immediately
-        def _process():
-            try:
-                vacancy_text = parse_hh_vacancy(hh_url)
-                if vacancy_text.startswith("Error:") or vacancy_text == "Invalid HH.ru URL":
-                    send(user_id,
-                         f"❌ Не удалось получить вакансию.\n{vacancy_text}\n\n"
-                         "Проверь ссылку — она должна быть вида hh.ru/vacancy/12345678")
-                    s["state"] = "waiting_vacancy"
-                    return
-
-                adapted, metadata = generator.generate_safe_resume(
-                    s["resume_text"], vacancy_text
-                )
-                adapted_clean = clean_markdown(adapted)
-                conf = metadata.get("validation", {}).get("confidence", 1.0)
-                score = ats_score(conf)
-
-                if metadata.get("fallback_used"):
-                    header = (
-                        "⚠️ Не удалось безопасно адаптировать резюме.\n"
-                        "Возвращаем оригинал без изменений.\n\n"
-                    )
-                else:
-                    header = (
-                        f"✅ Резюме адаптировано!\n"
-                        f"📊 Match Score: {score}/100\n\n"
-                    )
-
-                body = header + adapted_clean
-
-                # Append soft info notes if any
-                info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
-                if info_notes:
-                    body += "\n\n" + "\n".join(info_notes)
-
-                send(user_id, body)
-
-                # Keep resume, reset state — ready for the next vacancy link
-                s["state"] = "waiting_vacancy"
-                _touch(user_id)
-
-                send(user_id,
-                     "💡 Хочешь проверить другую вакансию? "
-                     "Просто пришли новую ссылку — резюме сохранено 📎\n"
-                     "Для нового резюме отправь /reset")
-
-                logger.info("✅ Done for user %s | score=%d | fallback=%s",
-                            user_id, score, metadata.get("fallback_used"))
-
-            except Exception as e:
-                logger.exception("❌ _process() error for user %s: %s", user_id, e)
-                send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
-                s["state"] = "waiting_vacancy"
-
-        threading.Thread(target=_process, daemon=True).start()
-        return
-
-    # ── Fallthrough: unrecognised input ───────────────────────────────────────
+    # ── 4. Fallthrough ────────────────────────────────────────────────────────
     state = s.get("state", "waiting_resume")
     if state == "waiting_vacancy":
         send(user_id,
