@@ -642,6 +642,11 @@ def _parse_generic_vacancy(url: str) -> str:
 # Shared helpers
 # ════════════════════════════════════════════════════════════════════════════
 
+def is_linkedin_url(url: str) -> bool:
+    """Check if a URL belongs to LinkedIn."""
+    return "linkedin.com" in url.lower()
+
+
 def _dqa(soup: BeautifulSoup, data_qa: str) -> str:
     """Return stripped text for the first element with data-qa=<value>."""
     el = soup.find(attrs={"data-qa": data_qa})
