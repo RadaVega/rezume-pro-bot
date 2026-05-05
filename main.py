@@ -1,8 +1,9 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.0
+ResumePro AI — VK Bot v6.1
 Bilingual: detects vacancy language (EN/RU) and outputs in same language.
 Strict anti‑hallucination rules.
+LinkedIn forced to English.
 """
 
 import sys as _sys, os as _os
@@ -331,14 +332,25 @@ def build_score_report(resume_text: str, vacancy_text: str) -> str:
         lines.append("   Оценка основана на общем анализе текста.")
     return "\n".join(lines)
 
-def detect_language(text: str) -> str:
+def detect_language(text: str, url_hint: str = "") -> str:
+    """
+    Определяет язык вакансии.
+    Если URL содержит linkedin.com, возвращает 'en'.
+    Иначе анализирует текст.
+    """
+    if "linkedin.com" in url_hint.lower():
+        return "en"
     if not text:
         return "ru"
+    # Проверка на английские слова-маркеры
+    english_markers = ["the", "and", "for", "with", "you", "are", "not", "this", "that"]
+    lower = text.lower()
+    for marker in english_markers:
+        if f" {marker} " in lower or lower.startswith(marker + " "):
+            return "en"
     cyrillic = sum(1 for ch in text if 'а' <= ch.lower() <= 'я')
     latin = sum(1 for ch in text if 'a' <= ch.lower() <= 'z')
-    if latin > cyrillic:
-        return "en"
-    return "ru"
+    return "en" if latin > cyrillic else "ru"
 
 # ── Core conversation handler ─────────────────────────────────────────────────
 
@@ -474,8 +486,10 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                         s["state"] = "waiting_vacancy"
                     return
 
-                vacancy_lang = detect_language(vacancy_text)
-                logger.info(f"Detected vacancy language: {vacancy_lang}")
+                # Определяем язык вакансии с учётом подсказки URL
+                vacancy_lang = detect_language(vacancy_text, vacancy_label)
+                s["vacancy_lang"] = vacancy_lang  # сохраняем в сессии для единообразия
+                logger.info(f"Определён язык вакансии: {vacancy_lang}")
 
                 if score_mode:
                     report = build_score_report(s["resume_text"], vacancy_text)
@@ -486,7 +500,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     logger.info("✅ Score report done for user %s", user_id)
 
                 elif coverletter_mode:
-                    letter, metadata = generator.generate_cover_letter(s["resume_text"], vacancy_text, language=vacancy_lang)
+                    letter, metadata = generator.generate_cover_letter(s["resume_text"], vacancy_text, language=s["vacancy_lang"])
                     letter_clean = clean_markdown(letter)
                     if metadata.get("fallback_used"):
                         send(user_id, "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" + letter_clean)
@@ -503,7 +517,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
 
                 elif both_mode:
                     try:
-                        adapted, r_meta = generator.generate_safe_resume(s["resume_text"], vacancy_text, language=vacancy_lang)
+                        adapted, r_meta = generator.generate_safe_resume(s["resume_text"], vacancy_text, language=s["vacancy_lang"])
                         adapted_clean = clean_markdown(adapted)
                         validation_dict = r_meta.get("validation")
                         if validation_dict is None:
@@ -527,7 +541,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             resume_title = f"Адаптированное резюме — {fname}"
                             _send_pdf_or_text(user_id, resume_pdf_text, title=resume_title, fallback_header=f"✅ Резюме адаптировано! Match Score: {score}/100\n\n")
                             s["last_resume_pdf"] = {"text": resume_pdf_text, "title": resume_title}
-                        letter, l_meta = generator.generate_cover_letter(s["resume_text"], vacancy_text, language=vacancy_lang)
+                        letter, l_meta = generator.generate_cover_letter(s["resume_text"], vacancy_text, language=s["vacancy_lang"])
                         letter_clean = clean_markdown(letter)
                         if l_meta.get("fallback_used"):
                             send(user_id, "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" + letter_clean)
@@ -548,7 +562,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                 else:
                     # DEFAULT MODE (auto both)
                     try:
-                        adapted, r_meta = generator.generate_safe_resume(s["resume_text"], vacancy_text, language=vacancy_lang)
+                        adapted, r_meta = generator.generate_safe_resume(s["resume_text"], vacancy_text, language=s["vacancy_lang"])
                         adapted_clean = clean_markdown(adapted)
                         validation_dict = r_meta.get("validation")
                         if validation_dict is None:
@@ -572,7 +586,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             resume_title = f"Адаптированное резюме — {fname}"
                             _send_pdf_or_text(user_id, resume_pdf_text, title=resume_title, fallback_header=f"✅ Резюме адаптировано! Match Score: {score}/100\n\n")
                             s["last_resume_pdf"] = {"text": resume_pdf_text, "title": resume_title}
-                        letter, l_meta = generator.generate_cover_letter(s["resume_text"], vacancy_text, language=vacancy_lang)
+                        letter, l_meta = generator.generate_cover_letter(s["resume_text"], vacancy_text, language=s["vacancy_lang"])
                         letter_clean = clean_markdown(letter)
                         if l_meta.get("fallback_used"):
                             send(user_id, "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" + letter_clean)
@@ -588,7 +602,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     except Exception as e:
                         logger.exception("❌ Generation error in auto mode: %s", e)
                         send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
-                        s["state"] = "waiting_vacancy"   # <-- FIXED: removed extra parenthesis
+                        s["state"] = "waiting_vacancy"
 
             except Exception as e:
                 logger.exception("❌ _process() outer error for user %s: %s", user_id, e)
@@ -657,7 +671,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
         return
     if cmd in ("/здоровье", "/health"):
-        send(user_id, f"✅ Бот работает! Версия 6.0\nАктивных сессий: {len(_sessions)}")
+        send(user_id, f"✅ Бот работает! Версия 6.1\nАктивных сессий: {len(_sessions)}")
         return
     if cmd in ("/статус", "/status", "статус"):
         state = s.get("state", "waiting_resume")
@@ -759,7 +773,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.0",
+        "version": "6.1",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -780,7 +794,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.0...")
+    logger.info("🚀 Starting ResumePro AI bot v6.1...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
