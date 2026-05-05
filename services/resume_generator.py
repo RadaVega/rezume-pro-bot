@@ -1,7 +1,7 @@
 # services/resume_generator.py
 """
 Сервис генерации резюме с защитой от галлюцинаций.
-Версия: 5.4 (cover letter validation bypassed)
+Версия: 5.5 – added logging and truncation
 """
 
 import logging
@@ -11,7 +11,7 @@ from prompts.anti_hallucination import (
     SYSTEM_PROMPT_COVER_LETTER,
     RETRY_CORRECTION_SUFFIX,
 )
-from utils.validation import validate_resume_facts, get_validation_summary
+from utils.validation import validate_resume_facts
 
 logger = logging.getLogger(__name__)
 
@@ -27,37 +27,42 @@ class AntiHallucinationGenerator:
 
     def _call_gigachat(self, prompt: str) -> str:
         """
-        Call GigaChat with a plain string prompt (old SDK style).
-        This matches the actual gigachat package version (0.1.x) which
-        does NOT accept the messages list format.
+        Call GigaChat with a plain string prompt.
+        Logs prompt length and response details to debug empty responses.
         """
+        logger.info(f"📤 Calling GigaChat, prompt length: {len(prompt)} chars")
         try:
             response = self.gigachat.chat(prompt)
+            logger.info(f"📥 Response type: {type(response)}")
+            
+            if hasattr(response, "choices") and response.choices:
+                content = response.choices[0].message.content
+                logger.info(f"✅ Content length: {len(content) if content else 0}")
+                if content:
+                    logger.debug(f"Content preview: {content[:200]}")
+                return content.strip() if content else ""
+            if isinstance(response, str):
+                logger.info(f"✅ String response length: {len(response)}")
+                return response.strip()
+            if hasattr(response, "text"):
+                logger.info(f"✅ Response.text length: {len(response.text)}")
+                return response.text.strip()
+            logger.warning(f"Unexpected response structure: {response}")
+            return ""
         except Exception as e:
-            logger.error(f"GigaChat call failed: {e}")
+            logger.error(f"❌ GigaChat call failed: {e}", exc_info=True)
             return ""
 
-        # Extract content from response
-        if hasattr(response, "choices") and response.choices:
-            content = response.choices[0].message.content
-            return content.strip() if content else ""
-        if isinstance(response, str):
-            return response.strip()
-        if hasattr(response, "text"):
-            return response.text.strip()
-        return str(response).strip()
-
     def _build_base_prompt(self, resume_text: str, vacancy_text: str) -> str:
+        # Truncate to avoid token limits
+        resume_text = (resume_text[:3000] + "…") if len(resume_text) > 3000 else resume_text
+        vacancy_text = (vacancy_text[:2000] + "…") if len(vacancy_text) > 2000 else vacancy_text
         return SYSTEM_PROMPT_ANTI_HALLUCINATION.format(
             resume_text=resume_text,
             vacancy_text=vacancy_text,
         )
 
     def _enrich_prompt(self, base_prompt: str, resume_text: str) -> str:
-        """
-        Inject a concrete list of allowed skills/companies into the prompt.
-        GigaChat responds much better to explicit lists than to abstract rules.
-        """
         from utils.validation import extract_entities, TECH_SKILLS
 
         entities = extract_entities(resume_text)
@@ -95,10 +100,6 @@ class AntiHallucinationGenerator:
         return base_prompt + "\n".join(lines)
 
     def _build_retry_prompt(self, base_prompt: str, issues: list, attempt: int) -> str:
-        """
-        Append a correction note to the BASE prompt (not to previous retries),
-        so the prompt length stays bounded.
-        """
         correction = RETRY_CORRECTION_SUFFIX.format(
             attempt=attempt,
             issues="; ".join(issues),
@@ -107,10 +108,6 @@ class AntiHallucinationGenerator:
 
     @staticmethod
     def _fallback_response(resume_text: str, issues: list) -> str:
-        # IMPORTANT: Do NOT include the raw issues text here.
-        # Issues contain the hallucinated keywords (e.g. "python, sql"), and
-        # including them would cause forbidden-keyword checks to fire on the
-        # fallback output even though the user only receives the original resume.
         attempt_count = len(issues)
         return (
             resume_text
@@ -128,13 +125,6 @@ class AntiHallucinationGenerator:
     def generate_safe_resume(
         self, resume_text: str, vacancy_text: str
     ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Generate an adapted resume with hallucination validation.
-
-        Returns (adapted_text, metadata).
-        If all attempts fail (validation or exception), returns the original
-        resume with a warning — never raises to the caller.
-        """
         metadata: Dict[str, Any] = {
             "attempts": 0,
             "validation_passed": False,
@@ -152,22 +142,18 @@ class AntiHallucinationGenerator:
             metadata["attempts"] = attempt + 1
 
             try:
-                # ── Build prompt ──────────────────────────────────────────────
                 if attempt == 0:
                     prompt = base_prompt
                 else:
-                    # Retry: append correction note to the ORIGINAL base prompt
                     prompt = self._build_retry_prompt(
                         base_prompt, metadata["issues"], attempt
                     )
 
-                # ── Generate ──────────────────────────────────────────────────
                 adapted_text = self._call_gigachat(prompt)
                 if not adapted_text:
                     logger.warning(f"⚠️ Empty response on attempt {attempt + 1}")
                     continue
 
-                # ── Validate ──────────────────────────────────────────────────
                 validation = validate_resume_facts(resume_text, adapted_text)
                 metadata["validation"] = validation
 
@@ -182,14 +168,11 @@ class AntiHallucinationGenerator:
                     metadata["validation_passed"] = True
                     return adapted_text, metadata
 
-                # ── Collect issues for next retry ─────────────────────────────
                 metadata["issues"] = validation["issues"]
 
             except Exception as e:
                 logger.error(f"❌ Generation error on attempt {attempt + 1}: {e}")
-                # Do NOT re-raise: fall through loop → use fallback
 
-        # ── All attempts exhausted → safe fallback ────────────────────────────
         metadata["fallback_used"] = True
         logger.error(
             f"❌ All {self.max_retries + 1} attempts failed. "
@@ -201,8 +184,7 @@ class AntiHallucinationGenerator:
         self, resume_text: str, vacancy_text: str
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Generate a cover letter. Validation is skipped to guarantee delivery.
-        Only empty responses trigger a fallback.
+        Generate a cover letter. Truncates inputs and bypasses all validation.
         """
         metadata: Dict[str, Any] = {
             "attempts": 0,
@@ -211,6 +193,10 @@ class AntiHallucinationGenerator:
             "issues": [],
             "validation": None,
         }
+
+        # Truncate to avoid excessive token usage
+        resume_text = (resume_text[:2500] + "…") if len(resume_text) > 2500 else resume_text
+        vacancy_text = (vacancy_text[:2000] + "…") if len(vacancy_text) > 2000 else vacancy_text
 
         base_prompt = self._enrich_prompt(
             SYSTEM_PROMPT_COVER_LETTER.format(
@@ -227,11 +213,7 @@ class AntiHallucinationGenerator:
                 prompt = (
                     base_prompt
                     if attempt == 0
-                    else (
-                        self._build_retry_prompt(
-                            base_prompt, metadata["issues"], attempt
-                        )
-                    )
+                    else self._build_retry_prompt(base_prompt, metadata["issues"], attempt)
                 )
 
                 letter_text = self._call_gigachat(prompt)
@@ -239,8 +221,8 @@ class AntiHallucinationGenerator:
                     logger.warning(f"Empty response on attempt {attempt + 1}")
                     continue
 
-                # Skip all validation – accept any non‑empty response
-                logger.info(f"Cover letter attempt {attempt + 1}: ACCEPTED (no validation)")
+                # Accept any non‑empty response
+                logger.info(f"Cover letter attempt {attempt + 1}: ACCEPTED (length={len(letter_text)})")
                 metadata["validation_passed"] = True
                 return letter_text, metadata
 
@@ -249,7 +231,7 @@ class AntiHallucinationGenerator:
 
         metadata["fallback_used"] = True
         fallback_letter = (
-            "⚠️ Не удалось безопасно сгенерировать сопроводительное письмо.\n\n"
+            "⚠️ Не удалось сгенерировать сопроводительное письмо.\n\n"
             "Пожалуйста, напишите его вручную на основе вашего резюме."
         )
         return fallback_letter, metadata

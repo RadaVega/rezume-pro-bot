@@ -1047,4 +1047,4 @@ if __name__ == "__main__":
     logger.info("🚀 Starting ResumePro AI bot v5.6...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
-    app.run(host="0.0.0.0", port=Config.PORT, debug=False)
+    app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
