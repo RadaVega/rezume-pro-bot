@@ -1,9 +1,7 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.1
-Bilingual: detects vacancy language (EN/RU) and outputs in same language.
-Strict anti‑hallucination rules.
-LinkedIn forced to English.
+ResumePro AI — VK Bot v6.2
+Fixed: webhook returns instantly, thread-safe deduplication.
 """
 
 import sys as _sys, os as _os
@@ -57,23 +55,28 @@ gigachat = GigaChat(credentials=Config.GIGACHAT_API_KEY, verify_ssl_certs=False)
 generator = AntiHallucinationGenerator(gigachat, max_retries=Config.MAX_RETRIES)
 logger.info("✅ Bot ready. Group: %s", Config.VK_GROUP_ID)
 
+# ── Thread‑safe deduplication ────────────────────────────────────────────────
 _seen_msg_ids: OrderedDict = OrderedDict()
+_seen_lock = threading.Lock()          # ← added lock
 _MSG_TTL = 60
 _MSG_CACHE_MAX = 2000
 
 def _is_duplicate_message(message_id: int) -> bool:
+    """Return True if this VK message_id was already processed. Thread-safe."""
     if not message_id:
         return False
     now = time.time()
-    while _seen_msg_ids and next(iter(_seen_msg_ids.values())) < now - _MSG_TTL:
-        _seen_msg_ids.popitem(last=False)
-    if message_id in _seen_msg_ids:
-        return True
-    _seen_msg_ids[message_id] = now
-    if len(_seen_msg_ids) > _MSG_CACHE_MAX:
-        _seen_msg_ids.popitem(last=False)
+    with _seen_lock:
+        while _seen_msg_ids and next(iter(_seen_msg_ids.values())) < now - _MSG_TTL:
+            _seen_msg_ids.popitem(last=False)
+        if message_id in _seen_msg_ids:
+            return True
+        _seen_msg_ids[message_id] = now
+        if len(_seen_msg_ids) > _MSG_CACHE_MAX:
+            _seen_msg_ids.popitem(last=False)
     return False
 
+# ── User session store ────────────────────────────────────────────────────────
 _sessions: dict = {}
 _SESSION_TTL = 3600
 
@@ -108,6 +111,7 @@ def _session_cleanup() -> None:
         if expired:
             logger.debug("🧹 Cleaned %d expired sessions", len(expired))
 
+# ── Static messages ───────────────────────────────────────────────────────────
 GREETING = (
     "👋 Привет! Я бот Резюме.Про 🎯\n"
     "Я помогу адаптировать твоё резюме под вакансию за 30 секунд с помощью ИИ.\n\n"
@@ -333,16 +337,11 @@ def build_score_report(resume_text: str, vacancy_text: str) -> str:
     return "\n".join(lines)
 
 def detect_language(text: str, url_hint: str = "") -> str:
-    """
-    Определяет язык вакансии.
-    Если URL содержит linkedin.com, возвращает 'en'.
-    Иначе анализирует текст.
-    """
+    """Определяет язык вакансии; для LinkedIn принудительно English."""
     if "linkedin.com" in url_hint.lower():
         return "en"
     if not text:
         return "ru"
-    # Проверка на английские слова-маркеры
     english_markers = ["the", "and", "for", "with", "you", "are", "not", "this", "that"]
     lower = text.lower()
     for marker in english_markers:
@@ -486,9 +485,8 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                         s["state"] = "waiting_vacancy"
                     return
 
-                # Определяем язык вакансии с учётом подсказки URL
                 vacancy_lang = detect_language(vacancy_text, vacancy_label)
-                s["vacancy_lang"] = vacancy_lang  # сохраняем в сессии для единообразия
+                s["vacancy_lang"] = vacancy_lang
                 logger.info(f"Определён язык вакансии: {vacancy_lang}")
 
                 if score_mode:
@@ -671,7 +669,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
         return
     if cmd in ("/здоровье", "/health"):
-        send(user_id, f"✅ Бот работает! Версия 6.1\nАктивных сессий: {len(_sessions)}")
+        send(user_id, f"✅ Бот работает! Версия 6.2\nАктивных сессий: {len(_sessions)}")
         return
     if cmd in ("/статус", "/status", "статус"):
         state = s.get("state", "waiting_resume")
@@ -741,8 +739,16 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         send(user_id, GREETING)
 
 
-# ── Flask routes ──────────────────────────────────────────────────────────────
+# ── Background dispatcher for webhook ─────────────────────────────────────────
+def _safe_handle(user_id: int, text: str, attachments: list) -> None:
+    """Dispatch handle() from a background thread so the webhook returns instantly."""
+    try:
+        handle(user_id, text, attachments)
+    except Exception as e:
+        logger.exception("Unhandled error for user %s: %s", user_id, e)
+        send(user_id, "❌ Непредвиденная ошибка. Попробуй позже.")
 
+# ── Flask routes ──────────────────────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json or {}
@@ -753,27 +759,30 @@ def webhook():
         return jsonify({"status": "ok"})
     msg = data.get("object", {}).get("message", {})
     message_id = msg.get("id")
-    user_id = msg.get("from_id")
-    text = (msg.get("text") or "").strip()
+    user_id    = msg.get("from_id")
+    text       = (msg.get("text") or "").strip()
     attachments = msg.get("attachments") or []
     if not user_id or user_id < 0:
         return jsonify({"status": "ok"})
     if _is_duplicate_message(message_id):
         logger.debug("⏭️ Duplicate msg_id=%s from user %s — skipped", message_id, user_id)
         return jsonify({"status": "ok"})
-    logger.info("📨 user=%s msg_id=%s text='%.60s' attachments=%d", user_id, message_id, text, len(attachments))
-    try:
-        handle(user_id, text, attachments)
-    except Exception as e:
-        logger.exception("Unhandled error for user %s: %s", user_id, e)
-        send(user_id, "❌ Непредвиденная ошибка. Попробуй позже.")
-    return jsonify({"status": "ok"})
+    logger.info("📨 user=%s msg_id=%s text='%.60s' attachments=%d",
+                user_id, message_id, text, len(attachments))
+    # Dispatch to background thread and return immediately.
+    # This prevents VK from timing out and retrying (which caused 3× duplicates).
+    threading.Thread(
+        target=_safe_handle,
+        args=(user_id, text, attachments),
+        daemon=True,
+    ).start()
+    return jsonify({"status": "ok"})   # ← returned in <10 ms
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.1",
+        "version": "6.2",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -794,7 +803,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.1...")
+    logger.info("🚀 Starting ResumePro AI bot v6.2...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
