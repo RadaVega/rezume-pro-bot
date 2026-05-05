@@ -1,14 +1,17 @@
 # main.py
 """
-ResumePro AI — VK Bot v5.3
+ResumePro AI — VK Bot v5.5
 Conversation flow:
-  /start | привет | empty  → greeting (ALWAYS, no dedup)
-  PDF/DOCX attachment       → parse resume, save to session, ask for HH link
-  hh.ru/vacancy/... link    → adapt stored resume, show result
-                              (resume stays in session — user can send another link)
-  /reset                    → clear session, start over
-  /demo                     → example output
-  /help                     → instructions
+  /старт | привет | empty   → приветствие (всегда, без дедупликации)
+  PDF/DOCX attachment       → разобрать резюме, сохранить в сессию, попросить ссылку HH
+  hh.ru/vacancy/... link    → адаптировать резюме, показать результат
+                              (резюме остаётся в сессии — можно отправить другую ссылку)
+  /письмо                   → сопроводительное письмо под следующую ссылку HH
+  /анализ                   → детальный разбор соответствия вакансии
+  /оба                      → резюме + письмо одновременно
+  /сброс                    → очистить сессию, начать заново
+  /пример                   → пример вывода
+  /помощь                   → инструкции
 """
 
 # ── Package path: .pkgs/ is pre-installed during the Build stage ──────────────
@@ -38,7 +41,7 @@ from gigachat import GigaChat
 
 from services.resume_generator import AntiHallucinationGenerator
 from utils.utils import extract_text_from_file, parse_hh_vacancy, clean_markdown
-from utils.validation import get_validation_summary
+from utils.validation import get_validation_summary, extract_entities, _scan_tech_skills, TECH_SKILLS
 from config.settings import Config
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -134,9 +137,13 @@ GREETING = (
     "2. Пришли ссылку на вакансию с hh.ru\n"
     "3. Получи адаптированную версию + Match Score\n\n"
     "💡 Команды:\n"
-    "• /help  — справка\n"
-    "• /demo  — показать пример\n"
-    "• /reset — начать заново\n\n"
+    "• /помощь   — справка\n"
+    "• /пример   — показать пример\n"
+    "• /анализ   — детальный анализ соответствия вакансии\n"
+    "• /письмо   — написать сопроводительное письмо\n"
+    "• /оба      — резюме + письмо одновременно\n"
+    "• /статус   — показать текущее состояние сессии\n"
+    "• /сброс    — начать заново\n\n"
     "Проект Школы 21 • Готов помочь! 🚀"
 )
 
@@ -144,6 +151,7 @@ HELP = (
     "📖 Справка ResumePro AI\n\n"
     "Что умею:\n"
     "• Адаптирую резюме под конкретную вакансию\n"
+    "• Пишу сопроводительное письмо под вакансию (/письмо)\n"
     "• Выделяю ключевые слова из вакансии\n"
     "• Защита от ИИ-галлюцинаций — не добавляю несуществующий опыт\n"
     "• Сохраняю резюме в сессии — одно резюме для нескольких вакансий\n\n"
@@ -151,7 +159,24 @@ HELP = (
     "1. Отправь файл резюме (PDF или DOCX)\n"
     "2. После подтверждения пришли ссылку hh.ru/vacancy/...\n"
     "3. Получи результат. Резюме останется — пришли новую ссылку!\n\n"
-    "⚠️ Поддерживаются только вакансии с hh.ru"
+    "Сопроводительное письмо:\n"
+    "1. Загрузи резюме (если ещё не загружено)\n"
+    "2. Отправь /письмо\n"
+    "3. Пришли ссылку на вакансию с hh.ru\n\n"
+    "Анализ соответствия (/анализ):\n"
+    "1. Загрузи резюме\n"
+    "2. Отправь /анализ\n"
+    "3. Пришли ссылку — получишь разбор по навыкам:\n"
+    "   ✅ что уже есть, ❌ чего не хватает, 💡 рекомендации\n\n"
+    "Резюме + письмо сразу:\n"
+    "1. Загрузи резюме\n"
+    "2. Отправь /оба\n"
+    "3. Пришли ссылку — получишь оба документа\n\n"
+    "⚠️ Поддерживаются только вакансии с hh.ru\n\n"
+    "Команды:\n"
+    "• /статус   — показать текущее состояние сессии\n"
+    "• /сброс    — начать заново\n"
+    "• /старт    — вернуться в начало"
 )
 
 DEMO = (
@@ -228,6 +253,73 @@ def ats_score(confidence: float) -> int:
     return round(confidence * 100)
 
 
+def build_score_report(resume_text: str, vacancy_text: str) -> str:
+    """
+    Сравнивает навыки из резюме с требованиями вакансии.
+    Возвращает детальный отчёт на русском языке.
+    """
+    resume_entities = extract_entities(resume_text)
+    resume_tech: set = resume_entities["skills"] & TECH_SKILLS
+
+    vacancy_tech: set = _scan_tech_skills(vacancy_text)
+
+    present = sorted(resume_tech & vacancy_tech)
+    missing = sorted(vacancy_tech - resume_tech)
+    extra   = sorted(resume_tech - vacancy_tech)
+
+    total = len(vacancy_tech)
+    if total == 0:
+        score = 100 if resume_tech else 0
+    else:
+        score = round(len(present) / total * 100)
+
+    lines = [
+        f"📊 Анализ соответствия вакансии",
+        f"─────────────────────────────",
+        f"🎯 Match Score: {score}/100",
+        "",
+    ]
+
+    if present:
+        lines.append(f"✅ Есть в резюме и нужны вакансии ({len(present)}):")
+        lines.append("   " + ",  ".join(present))
+        lines.append("")
+
+    if missing:
+        lines.append(f"❌ Требуются вакансией, но отсутствуют ({len(missing)}):")
+        lines.append("   " + ",  ".join(missing))
+        lines.append("")
+
+    if extra:
+        lines.append(f"📌 Есть в резюме, но не упомянуты в вакансии ({len(extra)}):")
+        lines.append("   " + ",  ".join(extra))
+        lines.append("")
+
+    lines.append("💡 Рекомендации:")
+    if present:
+        highlight = ", ".join(present[:5])
+        lines.append(f"  → Выдели в резюме: {highlight}")
+    if missing:
+        if len(missing) <= 3:
+            lines.append(f"  → Навыки для изучения: {', '.join(missing)}")
+        else:
+            top = ", ".join(missing[:3])
+            lines.append(f"  → Приоритетные навыки для изучения: {top} и ещё {len(missing)-3}")
+    if score >= 80:
+        lines.append("  → Отличное соответствие! Смело отправляй резюме.")
+    elif score >= 50:
+        lines.append("  → Хорошая база. Адаптируй резюме командой /оба.")
+    else:
+        lines.append("  → Навыков пока немного. Попробуй адаптировать резюме через /оба.")
+
+    if total == 0:
+        lines.append("")
+        lines.append("ℹ️ В вакансии не найдено технических навыков из базы.")
+        lines.append("   Оценка основана на общем анализе текста.")
+
+    return "\n".join(lines)
+
+
 # ── Core conversation handler ─────────────────────────────────────────────────
 
 def handle(user_id: int, text: str, attachments: list) -> None:
@@ -292,8 +384,22 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
             return
 
-        send(user_id, "⏳ Анализирую вакансию и адаптирую резюме...\nЭто займёт около 30 секунд.")
+        current_state = s.get("state")
+        coverletter_mode = current_state == "waiting_coverletter"
+        both_mode = current_state == "waiting_both"
+        score_mode = current_state == "waiting_score"
+
+        if score_mode:
+            send(user_id, "⏳ Анализирую соответствие резюме вакансии...\nОбычно это занимает несколько секунд.")
+        elif coverletter_mode:
+            send(user_id, "⏳ Составляю сопроводительное письмо...\nЭто займёт около 30 секунд.")
+        elif both_mode:
+            send(user_id, "⏳ Адаптирую резюме и пишу сопроводительное письмо одновременно...\nЭто займёт около 60 секунд.")
+        else:
+            send(user_id, "⏳ Анализирую вакансию и адаптирую резюме...\nЭто займёт около 30 секунд.")
+
         s["state"] = "processing"
+        s["last_vacancy_url"] = hh_url
         _touch(user_id)
 
         def _process():
@@ -303,72 +409,280 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     send(user_id,
                          f"❌ Не удалось получить вакансию.\n{vacancy_text}\n\n"
                          "Проверь ссылку — она должна быть вида hh.ru/vacancy/12345678")
-                    s["state"] = "waiting_vacancy"
+                    if coverletter_mode:
+                        s["state"] = "waiting_coverletter"
+                    elif both_mode:
+                        s["state"] = "waiting_both"
+                    else:
+                        s["state"] = "waiting_vacancy"
                     return
 
-                adapted, metadata = generator.generate_safe_resume(s["resume_text"], vacancy_text)
-                adapted_clean = clean_markdown(adapted)
-                conf = metadata.get("validation", {}).get("confidence", 1.0)
-                score = ats_score(conf)
+                if score_mode:
+                    # ── Score / keyword breakdown ─────────────────────────────
+                    report = build_score_report(s["resume_text"], vacancy_text)
+                    send(user_id, report)
+                    s["state"] = "waiting_vacancy"
+                    _touch(user_id)
+                    send(user_id,
+                         "💡 Хочешь адаптировать резюме под эту вакансию?\n"
+                         "• /оба — резюме + письмо сразу\n"
+                         "• просто пришли ту же ссылку — получишь адаптированное резюме\n"
+                         "• /сброс — загрузить другое резюме")
+                    logger.info("✅ Score report done for user %s", user_id)
 
-                if metadata.get("fallback_used"):
-                    header = "⚠️ Не удалось безопасно адаптировать резюме.\nВозвращаем оригинал без изменений.\n\n"
+                elif coverletter_mode:
+                    # ── Cover letter only ─────────────────────────────────────
+                    letter, metadata = generator.generate_cover_letter(s["resume_text"], vacancy_text)
+                    letter_clean = clean_markdown(letter)
+                    header = "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" \
+                        if metadata.get("fallback_used") else "✉️ Сопроводительное письмо готово!\n\n"
+                    send(user_id, header + letter_clean)
+                    s["state"] = "waiting_vacancy"
+                    _touch(user_id)
+                    send(user_id,
+                         "💡 Хочешь адаптировать резюме под эту же вакансию?\n"
+                         "Просто пришли ту же ссылку ещё раз.\n"
+                         "Для нового резюме отправь /сброс")
+                    logger.info("✅ Cover letter done for user %s | fallback=%s",
+                                user_id, metadata.get("fallback_used"))
+
+                elif both_mode:
+                    # ── Resume + cover letter in parallel ─────────────────────
+                    resume_result: dict = {}
+                    letter_result: dict = {}
+
+                    def _gen_resume():
+                        adapted, meta = generator.generate_safe_resume(s["resume_text"], vacancy_text)
+                        resume_result["text"] = adapted
+                        resume_result["meta"] = meta
+
+                    def _gen_letter():
+                        letter, meta = generator.generate_cover_letter(s["resume_text"], vacancy_text)
+                        letter_result["text"] = letter
+                        letter_result["meta"] = meta
+
+                    t1 = threading.Thread(target=_gen_resume, daemon=True)
+                    t2 = threading.Thread(target=_gen_letter, daemon=True)
+                    t1.start()
+                    t2.start()
+                    t1.join()
+                    t2.join()
+
+                    # Send resume first
+                    adapted_clean = clean_markdown(resume_result.get("text", ""))
+                    r_meta = resume_result.get("meta", {})
+                    conf = r_meta.get("validation", {}).get("confidence", 1.0)
+                    score = ats_score(conf)
+                    if r_meta.get("fallback_used"):
+                        r_header = "⚠️ Не удалось адаптировать резюме. Возвращаем оригинал.\n\n"
+                    else:
+                        r_header = f"✅ Резюме адаптировано!\n📊 Match Score: {score}/100\n\n"
+                    r_body = r_header + adapted_clean
+                    info_notes = [i for i in r_meta.get("issues", []) if i.startswith("ℹ️")]
+                    if info_notes:
+                        r_body += "\n\n" + "\n".join(info_notes)
+                    send(user_id, r_body)
+
+                    # Send cover letter second
+                    letter_clean = clean_markdown(letter_result.get("text", ""))
+                    l_meta = letter_result.get("meta", {})
+                    l_header = "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" \
+                        if l_meta.get("fallback_used") else "✉️ Сопроводительное письмо:\n\n"
+                    send(user_id, l_header + letter_clean)
+
+                    s["state"] = "waiting_vacancy"
+                    _touch(user_id)
+                    send(user_id,
+                         "💡 Резюме и письмо готовы! Пришли новую ссылку для другой вакансии.\n"
+                         "Для нового резюме отправь /сброс")
+                    logger.info("✅ Both done for user %s | resume_score=%d | letter_fallback=%s",
+                                user_id, score, l_meta.get("fallback_used"))
+
                 else:
-                    header = f"✅ Резюме адаптировано!\n📊 Match Score: {score}/100\n\n"
+                    # ── Resume only ───────────────────────────────────────────
+                    adapted, metadata = generator.generate_safe_resume(s["resume_text"], vacancy_text)
+                    adapted_clean = clean_markdown(adapted)
+                    conf = metadata.get("validation", {}).get("confidence", 1.0)
+                    score = ats_score(conf)
 
-                body = header + adapted_clean
-                info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
-                if info_notes:
-                    body += "\n\n" + "\n".join(info_notes)
+                    if metadata.get("fallback_used"):
+                        header = "⚠️ Не удалось безопасно адаптировать резюме.\nВозвращаем оригинал без изменений.\n\n"
+                    else:
+                        header = f"✅ Резюме адаптировано!\n📊 Match Score: {score}/100\n\n"
 
-                send(user_id, body)
-                s["state"] = "waiting_vacancy"
-                _touch(user_id)
-                send(user_id,
-                     "💡 Хочешь проверить другую вакансию? "
-                     "Просто пришли новую ссылку — резюме сохранено 📎\n"
-                     "Для нового резюме отправь /reset")
-                logger.info("✅ Done for user %s | score=%d | fallback=%s",
-                            user_id, score, metadata.get("fallback_used"))
+                    body = header + adapted_clean
+                    info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
+                    if info_notes:
+                        body += "\n\n" + "\n".join(info_notes)
+
+                    send(user_id, body)
+                    s["state"] = "waiting_vacancy"
+                    _touch(user_id)
+                    send(user_id,
+                         "💡 Хочешь проверить другую вакансию? "
+                         "Просто пришли новую ссылку — резюме сохранено 📎\n"
+                         "Нужно сопроводительное письмо? Отправь /письмо\n"
+                         "Нужно и то и другое? Отправь /оба\n"
+                         "Для нового резюме отправь /сброс")
+                    logger.info("✅ Done for user %s | score=%d | fallback=%s",
+                                user_id, score, metadata.get("fallback_used"))
 
             except Exception as e:
                 logger.exception("❌ _process() error for user %s: %s", user_id, e)
                 send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
-                s["state"] = "waiting_vacancy"
+                if score_mode:
+                    s["state"] = "waiting_score"
+                elif coverletter_mode:
+                    s["state"] = "waiting_coverletter"
+                elif both_mode:
+                    s["state"] = "waiting_both"
+                else:
+                    s["state"] = "waiting_vacancy"
 
         threading.Thread(target=_process, daemon=True).start()
         return
 
     # ── 3. Commands ───────────────────────────────────────────────────────────
-    if cmd in ("/start", "start", "начать", "привет", "hi", "hello", ""):
+    if cmd in ("/старт", "/start", "start", "начать", "привет", "hi", "hello", ""):
         _clear_session(user_id)
         send(user_id, GREETING)
         return
 
-    if cmd in ("/help", "help", "помощь"):
+    if cmd in ("/помощь", "/help", "help", "помощь"):
         send(user_id, HELP)
         return
 
-    if cmd in ("/demo", "demo", "пример"):
+    if cmd in ("/пример", "/demo", "demo", "пример"):
         send(user_id, DEMO)
         return
 
-    if cmd in ("/reset", "reset", "сброс"):
+    if cmd in ("/сброс", "/reset", "reset", "сброс"):
         _clear_session(user_id)
-        send(user_id, "🔄 Сессия сброшена.\n\nОтправь новый файл резюме или /start.")
+        send(user_id, "🔄 Сессия сброшена.\n\nОтправь новый файл резюме или напиши /старт.")
         return
 
-    if cmd == "/health":
-        send(user_id, f"✅ Бот работает! Версия 5.3\nАктивных сессий: {len(_sessions)}")
+    if cmd in ("/анализ", "/score", "score", "анализ", "скор"):
+        if not s.get("resume_text"):
+            send(user_id,
+                 "📎 Сначала отправь файл резюме (PDF или DOCX), "
+                 "а затем введи /анализ.")
+            return
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+        s["state"] = "waiting_score"
+        _touch(user_id)
+        fname = s.get("resume_filename", "резюме")
+        send(user_id,
+             f"📊 Режим: анализ соответствия\n"
+             f"Резюме: {fname}\n\n"
+             "Пришли ссылку на вакансию с hh.ru — и я покажу:\n"
+             "  ✅ какие навыки из резюме совпадают с вакансией\n"
+             "  ❌ чего не хватает\n"
+             "  💡 что стоит выделить или доучить\n\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "Для отмены отправь /сброс")
+        return
+
+    if cmd in ("/оба", "/both", "both", "оба", "всё"):
+        if not s.get("resume_text"):
+            send(user_id,
+                 "📎 Сначала отправь файл резюме (PDF или DOCX), "
+                 "а затем введи /оба.")
+            return
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+        s["state"] = "waiting_both"
+        _touch(user_id)
+        fname = s.get("resume_filename", "резюме")
+        send(user_id,
+             f"🚀 Режим: резюме + письмо\n"
+             f"Резюме: {fname}\n\n"
+             "Пришли ссылку на вакансию с hh.ru — и я сразу подготовлю\n"
+             "адаптированное резюме и сопроводительное письмо.\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "Для отмены отправь /сброс")
+        return
+
+    if cmd in ("/письмо", "/coverletter", "coverletter", "письмо", "сопроводительное"):
+        if not s.get("resume_text"):
+            send(user_id,
+                 "📎 Сначала отправь файл резюме (PDF или DOCX), "
+                 "а затем введи /письмо.")
+            return
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+        s["state"] = "waiting_coverletter"
+        _touch(user_id)
+        fname = s.get("resume_filename", "резюме")
+        send(user_id,
+             f"✉️ Режим сопроводительного письма\n"
+             f"Резюме: {fname}\n\n"
+             "Пришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "Для отмены отправь /сброс")
+        return
+
+    if cmd in ("/здоровье", "/health"):
+        send(user_id, f"✅ Бот работает! Версия 5.5\nАктивных сессий: {len(_sessions)}")
+        return
+
+    if cmd in ("/статус", "/status", "статус"):
+        state = s.get("state", "waiting_resume")
+        resume_file = s.get("resume_filename")
+        resume_len = len(s.get("resume_text") or "")
+        last_url = s.get("last_vacancy_url")
+
+        state_labels = {
+            "waiting_resume":     "⏳ Ожидание резюме",
+            "waiting_vacancy":    "🔗 Ожидание ссылки на вакансию",
+            "waiting_score":      "📊 Режим анализа соответствия",
+            "waiting_both":       "🚀 Режим: резюме + письмо",
+            "waiting_coverletter": "✉️ Режим сопроводительного письма",
+            "processing":         "⚙️ Обрабатываю запрос…",
+        }
+        state_label = state_labels.get(state, state)
+
+        lines = ["📋 Состояние сессии:\n"]
+        if resume_file:
+            lines.append(f"📄 Резюме: {resume_file} ({resume_len} символов)")
+        else:
+            lines.append("📄 Резюме: не загружено")
+        lines.append(f"🔄 Режим: {state_label}")
+        if last_url:
+            lines.append(f"🔗 Последняя вакансия: {last_url}")
+        if state == "waiting_resume":
+            lines.append("\nОтправь файл резюме (PDF или DOCX) чтобы начать.")
+        elif state == "waiting_vacancy":
+            lines.append("\nПришли ссылку с hh.ru — или выбери режим (/анализ, /письмо, /оба).")
+
+        send(user_id, "\n".join(lines))
         return
 
     # ── 4. Fallthrough ────────────────────────────────────────────────────────
     state = s.get("state", "waiting_resume")
-    if state == "waiting_vacancy":
+    if state == "waiting_score":
+        send(user_id,
+             "📊 Жду ссылку на вакансию для анализа соответствия\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "Или /сброс чтобы выйти из режима анализа.")
+    elif state == "waiting_both":
+        send(user_id,
+             "🚀 Жду ссылку на вакансию — пришлю резюме и письмо\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "Или /сброс чтобы выйти из этого режима.")
+    elif state == "waiting_coverletter":
+        send(user_id,
+             "✉️ Жду ссылку на вакансию для сопроводительного письма\n"
+             "Пример: https://hh.ru/vacancy/12345678\n\n"
+             "Или /сброс чтобы выйти из режима письма.")
+    elif state == "waiting_vacancy":
         send(user_id,
              "🔗 Жду ссылку на вакансию с hh.ru\n"
              "Пример: https://hh.ru/vacancy/12345678\n\n"
-             "Или /reset чтобы загрузить другое резюме.")
+             "Или /сброс чтобы загрузить другое резюме.")
     elif state == "processing":
         send(user_id, "⏳ Ещё обрабатываю запрос, подожди немного...")
     else:
