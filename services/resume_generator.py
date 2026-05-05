@@ -1,7 +1,7 @@
 # services/resume_generator.py
 """
 Сервис генерации резюме с защитой от галлюцинаций.
-Версия: 5.0
+Версия: 5.1
 """
 
 import logging
@@ -25,19 +25,20 @@ class AntiHallucinationGenerator:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _call_gigachat(self, prompt: str, temperature: float = 0.1) -> str:
-        """Call GigaChat with graceful fallback for varying SDK versions."""
+    def _call_gigachat(self, prompt: str) -> str:
+        """
+        Call GigaChat with proper message format.
+        Uses the SDK's expected structure: list of dicts with 'role' and 'content'.
+        No temperature parameter – it's not supported in this SDK version.
+        """
         try:
-            response = self.gigachat.chat(prompt, temperature=temperature)
-        except TypeError as e:
-            if "unexpected keyword argument" in str(e):
-                logger.warning(
-                    f"⚠️ GigaChat: temperature kwarg not supported, retrying: {e}"
-                )
-                response = self.gigachat.chat(prompt)
-            else:
-                raise
+            messages = [{"role": "user", "content": prompt}]
+            response = self.gigachat.chat(messages)
+        except Exception as e:
+            logger.error(f"GigaChat call failed: {e}")
+            return ""
 
+        # Extract content from response
         if hasattr(response, "choices") and response.choices:
             content = response.choices[0].message.content
             return content.strip() if content else ""
@@ -162,7 +163,7 @@ class AntiHallucinationGenerator:
                     )
 
                 # ── Generate ──────────────────────────────────────────────────
-                adapted_text = self._call_gigachat(prompt, temperature=0.1)
+                adapted_text = self._call_gigachat(prompt)  # removed temperature
                 if not adapted_text:
                     logger.warning(f"⚠️ Empty response on attempt {attempt + 1}")
                     continue
@@ -236,7 +237,7 @@ class AntiHallucinationGenerator:
                     )
                 )
 
-                letter_text = self._call_gigachat(prompt, temperature=0.2)
+                letter_text = self._call_gigachat(prompt)  # removed temperature
                 if not letter_text:
                     continue
 
