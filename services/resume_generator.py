@@ -1,7 +1,7 @@
 # services/resume_generator.py
 """
 Сервис генерации резюме с защитой от галлюцинаций.
-Версия: 5.2
+Версия: 5.3 (cover letter relaxes company validation)
 """
 
 import logging
@@ -162,7 +162,7 @@ class AntiHallucinationGenerator:
                     )
 
                 # ── Generate ──────────────────────────────────────────────────
-                adapted_text = self._call_gigachat(prompt)  # plain string prompt
+                adapted_text = self._call_gigachat(prompt)
                 if not adapted_text:
                     logger.warning(f"⚠️ Empty response on attempt {attempt + 1}")
                     continue
@@ -183,7 +183,6 @@ class AntiHallucinationGenerator:
                     return adapted_text, metadata
 
                 # ── Collect issues for next retry ─────────────────────────────
-                # Replace (not accumulate) so the retry prompt stays concise
                 metadata["issues"] = validation["issues"]
 
             except Exception as e:
@@ -202,9 +201,9 @@ class AntiHallucinationGenerator:
         self, resume_text: str, vacancy_text: str
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Generate a cover letter with basic hallucination validation.
-
-        Returns (letter_text, metadata).
+        Generate a cover letter with relaxed validation: new company names
+        (from the vacancy) are allowed and do not block the output.
+        Only critical fabrications (fake years, fake positions) are blocked.
         """
         metadata: Dict[str, Any] = {
             "attempts": 0,
@@ -236,26 +235,37 @@ class AntiHallucinationGenerator:
                     )
                 )
 
-                letter_text = self._call_gigachat(prompt)  # plain string prompt
+                letter_text = self._call_gigachat(prompt)
                 if not letter_text:
                     continue
 
-                # Cover letters are checked with the same validator.
-                # We use the original resume as the source-of-truth.
+                # Validate but relax the company check for cover letters
                 validation = validate_resume_facts(resume_text, letter_text)
                 metadata["validation"] = validation
 
+                # Filter out "Новые компании" issues – they are acceptable in a cover letter
+                filtered_issues = [
+                    i for i in validation["issues"]
+                    if not i.startswith("🚨 Новые компании")
+                ]
+                # Re-check critical issues (excluding company fabrications)
+                critical_only = [i for i in filtered_issues if i.startswith("🚨")]
+                is_safe = len(critical_only) == 0
+
                 logger.info(
                     f"Cover letter attempt {attempt + 1}: "
-                    f"{'PASS' if validation['is_safe'] else 'FAIL'} | "
-                    f"confidence={validation['confidence']:.2f}"
+                    f"{'PASS' if is_safe else 'FAIL'} | "
+                    f"confidence={validation['confidence']:.2f} | "
+                    f"original_issues={len(validation['issues'])} filtered={len(filtered_issues)}"
                 )
 
-                if validation["is_safe"]:
+                if is_safe:
                     metadata["validation_passed"] = True
+                    # Store filtered issues (warnings only) in metadata
+                    metadata["issues"] = filtered_issues
                     return letter_text, metadata
 
-                metadata["issues"] = validation["issues"]
+                metadata["issues"] = filtered_issues
 
             except Exception as e:
                 logger.error(f"❌ Cover letter error on attempt {attempt + 1}: {e}")
