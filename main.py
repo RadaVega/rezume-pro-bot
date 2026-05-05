@@ -40,7 +40,11 @@ from vk_api.exceptions import ApiError as VkApiError
 from gigachat import GigaChat
 
 from services.resume_generator import AntiHallucinationGenerator
-from utils.utils import extract_text_from_file, parse_hh_vacancy, clean_markdown
+from utils.utils import (extract_text_from_file, parse_hh_vacancy,
+                         scrape_any_vacancy, parse_linkedin_vacancy,
+                         parse_superjob_vacancy, parse_rabota_vacancy,
+                         is_linkedin_url, is_superjob_url, is_rabota_url,
+                         clean_markdown)
 from utils.validation import get_validation_summary, extract_entities, _scan_tech_skills, TECH_SKILLS
 from utils.pdf_generator import text_to_pdf
 from config.settings import Config
@@ -315,9 +319,18 @@ def extract_hh_url(text: str) -> str:
     """Return the first hh.ru vacancy URL found in text, or ''."""
     m = re.search(r"https?://[^\s]*hh\.ru/vacancy/\d+[^\s]*", text)
     if m:
-        return m.group(0)
+        return m.group(0).rstrip(".,;!?)")
     m = re.search(r"hh\.ru/vacancy/\d+", text)
-    return m.group(0) if m else ""
+    return ("https://" + m.group(0)) if m else ""
+
+
+def extract_any_url(text: str) -> str:
+    """Return the first http URL in text that is NOT an hh.ru vacancy URL, or ''."""
+    for m in re.finditer(r"https?://[^\s]+", text):
+        url = m.group(0).rstrip(".,;!?)")
+        if "hh.ru/vacancy/" not in url:
+            return url
+    return ""
 
 
 def ats_score(confidence: float) -> int:
@@ -439,18 +452,67 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         s["state"] = "waiting_vacancy"
         _touch(user_id)
         logger.info("📄 Resume loaded for user %s: %s (%d chars)", user_id, fname, len(resume_text))
-        send(user_id,
-             f"✅ Резюме получено: {fname}\n\n"
-             "Теперь пришли ссылку на вакансию с hh.ru\n"
-             "Пример: https://hh.ru/vacancy/12345678\n\n"
-             "💡 После адаптации можно прислать другую ссылку — резюме останется в памяти!")
+
+        pending_url = s.pop("pending_vacancy_url", None)
+        pending_text = s.pop("pending_vacancy_text", None)
+        if pending_url:
+            send(user_id,
+                 f"✅ Резюме получено: {fname}\n\n"
+                 f"🔗 Вижу ссылку на вакансию, которую ты прислал раньше:\n{pending_url}\n\n"
+                 "Начинаю обработку...")
+            handle(user_id, pending_url, [])
+        elif pending_text:
+            preview = pending_text[:120].replace("\n", " ")
+            send(user_id,
+                 f"✅ Резюме получено: {fname}\n\n"
+                 f"📋 Вижу описание вакансии, которое ты прислал раньше:\n«{preview}…»\n\n"
+                 "Начинаю обработку...")
+            handle(user_id, pending_text, [])
+        else:
+            send(user_id,
+                 f"✅ Резюме получено: {fname}\n\n"
+                 "Теперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\n"
+                 "или просто вставь текст вакансии прямо в чат.\n\n"
+                 "💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
         return
 
-    # ── 2. HH.ru vacancy link ─────────────────────────────────────────────────
+    # ── 2. Vacancy source detection (hh.ru / any URL / pasted text) ───────────
     hh_url = extract_hh_url(text)
-    if hh_url:
+    other_url = ""
+    pasted_vacancy = ""
+
+    if not hh_url:
+        link_att = next((a for a in attachments if a.get("type") == "link"), None)
+        if link_att:
+            link_url = link_att.get("link", {}).get("url", "")
+            hh_url = extract_hh_url(link_url)
+            if hh_url:
+                logger.info("🔗 hh.ru URL from link attachment: %s", hh_url)
+            elif link_url:
+                other_url = link_url
+                logger.info("🔗 Non-hh URL from link attachment: %s", other_url)
+
+    if not hh_url and not other_url:
+        other_url = extract_any_url(text)
+
+    if (not hh_url and not other_url
+            and len(text) > 300
+            and not text.startswith("/")
+            and s.get("resume_text")):
+        pasted_vacancy = text
+
+    vacancy_input = hh_url or other_url or pasted_vacancy
+
+    if vacancy_input:
         if not s.get("resume_text"):
-            send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX).")
+            if pasted_vacancy:
+                s["pending_vacancy_text"] = pasted_vacancy
+            else:
+                s["pending_vacancy_url"] = hh_url or other_url
+            _touch(user_id)
+            send(user_id,
+                 "📎 Сначала отправь файл резюме (PDF или DOCX).\n\n"
+                 "💾 Запомнил описание/ссылку вакансии — пришли резюме и сразу начну!")
             return
         if s.get("state") == "processing":
             send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
@@ -461,6 +523,31 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         both_mode = current_state == "waiting_both"
         score_mode = current_state == "waiting_score"
 
+        if hh_url:
+            vacancy_getter = lambda: parse_hh_vacancy(hh_url)
+            vacancy_label = hh_url
+            source_name = "hh.ru"
+        elif other_url and is_linkedin_url(other_url):
+            vacancy_getter = lambda: parse_linkedin_vacancy(other_url)
+            vacancy_label = other_url
+            source_name = "LinkedIn"
+        elif other_url and is_superjob_url(other_url):
+            vacancy_getter = lambda: parse_superjob_vacancy(other_url)
+            vacancy_label = other_url
+            source_name = "SuperJob"
+        elif other_url and is_rabota_url(other_url):
+            vacancy_getter = lambda: parse_rabota_vacancy(other_url)
+            vacancy_label = other_url
+            source_name = "Работа.ру"
+        elif other_url:
+            vacancy_getter = lambda: scrape_any_vacancy(other_url)
+            vacancy_label = other_url
+            source_name = "сайта вакансий"
+        else:
+            vacancy_getter = lambda: pasted_vacancy
+            vacancy_label = "(текст вакансии)"
+            source_name = "вставленного текста"
+
         if score_mode:
             send(user_id, "⏳ Анализирую соответствие резюме вакансии...\nОбычно это занимает несколько секунд.")
         elif coverletter_mode:
@@ -468,19 +555,19 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         elif both_mode:
             send(user_id, "⏳ Адаптирую резюме и пишу сопроводительное письмо одновременно...\nЭто займёт около 60 секунд.")
         else:
-            send(user_id, "⏳ Анализирую вакансию и адаптирую резюме...\nЭто займёт около 30 секунд.")
+            send(user_id, f"⏳ Читаю вакансию ({source_name}) и адаптирую резюме...\nЭто займёт около 30 секунд.")
 
         s["state"] = "processing"
-        s["last_vacancy_url"] = hh_url
+        s["last_vacancy_url"] = vacancy_label
         _touch(user_id)
 
         def _process():
             try:
-                vacancy_text = parse_hh_vacancy(hh_url)
-                if vacancy_text.startswith("Error:") or vacancy_text == "Invalid HH.ru URL":
+                vacancy_text = vacancy_getter()
+                if isinstance(vacancy_text, str) and vacancy_text.startswith("Error:"):
                     send(user_id,
-                         f"❌ Не удалось получить вакансию.\n{vacancy_text}\n\n"
-                         "Проверь ссылку — она должна быть вида hh.ru/vacancy/12345678")
+                         f"❌ Не удалось получить данные вакансии.\n{vacancy_text}\n\n"
+                         "Попробуй вставить текст вакансии прямо в чат — скопируй описание и пришли его сюда.")
                     if coverletter_mode:
                         s["state"] = "waiting_coverletter"
                     elif both_mode:
