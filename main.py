@@ -1,17 +1,18 @@
 # main.py
 """
-ResumePro AI — VK Bot v5.5
+ResumePro AI — VK Bot v5.6
 Conversation flow:
   /старт | привет | empty   → приветствие (всегда, без дедупликации)
   PDF/DOCX attachment       → разобрать резюме, сохранить в сессию, попросить ссылку HH
-  hh.ru/vacancy/... link    → адаптировать резюме, показать результат
+  hh.ru/vacancy/... link    → адаптировать резюме + сопроводительное письмо (оба сразу)
                               (резюме остаётся в сессии — можно отправить другую ссылку)
-  /письмо                   → сопроводительное письмо под следующую ссылку HH
-  /анализ                   → детальный разбор соответствия вакансии
-  /оба                      → резюме + письмо одновременно
+  /письмо                   → только сопроводительное письмо под следующую ссылку HH
+  /анализ                   → детальный разбор соответствия вакансии (без адаптации)
+  /оба                      → резюме + письмо одновременно (то же, что и обычная ссылка)
   /сброс                    → очистить сессию, начать заново
   /пример                   → пример вывода
   /помощь                   → инструкции
+  /статус, /скачать и др.   → остаются без изменений
 """
 
 # ── Package path: .pkgs/ is pre-installed during the Build stage ──────────────
@@ -97,7 +98,8 @@ def _is_duplicate_message(message_id: int) -> bool:
 
 # ── User session store ────────────────────────────────────────────────────────
 # { user_id: { resume_text, resume_filename, state, updated_at } }
-# state: "waiting_resume" | "waiting_vacancy" | "processing"
+# state: "waiting_resume" | "waiting_vacancy" | "waiting_coverletter" |
+#        "waiting_both" | "waiting_score" | "processing"
 _sessions: dict = {}
 _SESSION_TTL = 3600  # 1 hour
 
@@ -555,7 +557,8 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         elif both_mode:
             send(user_id, "⏳ Адаптирую резюме и пишу сопроводительное письмо одновременно...\nЭто займёт около 60 секунд.")
         else:
-            send(user_id, f"⏳ Читаю вакансию ({source_name}) и адаптирую резюме...\nЭто займёт около 30 секунд.")
+            # Default mode (neither score, coverletter, nor both) – now generates both files
+            send(user_id, "⏳ Адаптирую резюме и пишу сопроводительное письмо одновременно...\nЭто займёт около 60 секунд.")
 
         s["state"] = "processing"
         s["last_vacancy_url"] = vacancy_label
@@ -616,7 +619,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                                 user_id, metadata.get("fallback_used"))
 
                 elif both_mode:
-                    # ── Resume + cover letter in parallel ─────────────────────
+                    # ── Resume + cover letter (explicit /оба) ─────────────────────
                     resume_result: dict = {}
                     letter_result: dict = {}
 
@@ -689,45 +692,78 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                                 user_id, score, l_meta.get("fallback_used"))
 
                 else:
-                    # ── Resume only ───────────────────────────────────────────
-                    adapted, metadata = generator.generate_safe_resume(s["resume_text"], vacancy_text)
-                    adapted_clean = clean_markdown(adapted)
-                    conf = metadata.get("validation", {}).get("confidence", 1.0)
+                    # ── DEFAULT MODE (NEW): resume + cover letter automatically ──
+                    # This is the same code as the '/оба' branch above.
+                    resume_result = {}
+                    letter_result = {}
+
+                    def _gen_resume():
+                        adapted, meta = generator.generate_safe_resume(s["resume_text"], vacancy_text)
+                        resume_result["text"] = adapted
+                        resume_result["meta"] = meta
+
+                    def _gen_letter():
+                        letter, meta = generator.generate_cover_letter(s["resume_text"], vacancy_text)
+                        letter_result["text"] = letter
+                        letter_result["meta"] = meta
+
+                    t1 = threading.Thread(target=_gen_resume, daemon=True)
+                    t2 = threading.Thread(target=_gen_letter, daemon=True)
+                    t1.start()
+                    t2.start()
+                    t1.join()
+                    t2.join()
+
+                    # Send resume first
+                    adapted_clean = clean_markdown(resume_result.get("text", ""))
+                    r_meta = resume_result.get("meta", {})
+                    conf = r_meta.get("validation", {}).get("confidence", 1.0)
                     score = ats_score(conf)
                     fname = s.get("resume_filename", "резюме").rsplit(".", 1)[0]
-
-                    info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
-
-                    if metadata.get("fallback_used"):
-                        body = "⚠️ Не удалось безопасно адаптировать резюме.\nВозвращаем оригинал без изменений.\n\n" + adapted_clean
+                    if r_meta.get("fallback_used"):
+                        r_body = "⚠️ Не удалось адаптировать резюме. Возвращаем оригинал.\n\n" + adapted_clean
+                        info_notes = [i for i in r_meta.get("issues", []) if i.startswith("ℹ️")]
                         if info_notes:
-                            body += "\n\n" + "\n".join(info_notes)
-                        send(user_id, body)
+                            r_body += "\n\n" + "\n".join(info_notes)
+                        send(user_id, r_body)
                     else:
                         send(user_id, f"✅ Генерирую PDF резюме (Match Score: {score}/100)...")
-                        pdf_text = adapted_clean
+                        resume_pdf_text = adapted_clean
+                        info_notes = [i for i in r_meta.get("issues", []) if i.startswith("ℹ️")]
                         if info_notes:
-                            pdf_text += "\n\n" + "\n".join(info_notes)
+                            resume_pdf_text += "\n\n" + "\n".join(info_notes)
                         resume_title = f"Адаптированное резюме — {fname}"
                         _send_pdf_or_text(
                             user_id,
-                            pdf_text,
+                            resume_pdf_text,
                             title=resume_title,
                             fallback_header=f"✅ Резюме адаптировано! Match Score: {score}/100\n\n",
                         )
-                        s["last_resume_pdf"] = {"text": pdf_text, "title": resume_title}
-                        s["last_letter_pdf"] = None
+                        s["last_resume_pdf"] = {"text": resume_pdf_text, "title": resume_title}
+
+                    # Send cover letter second
+                    letter_clean = clean_markdown(letter_result.get("text", ""))
+                    l_meta = letter_result.get("meta", {})
+                    if l_meta.get("fallback_used"):
+                        send(user_id, "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" + letter_clean)
+                    else:
+                        send(user_id, "✉️ Генерирую PDF сопроводительного письма...")
+                        letter_title = f"Сопроводительное письмо — {fname}"
+                        _send_pdf_or_text(
+                            user_id,
+                            letter_clean,
+                            title=letter_title,
+                            fallback_header="✉️ Сопроводительное письмо:\n\n",
+                        )
+                        s["last_letter_pdf"] = {"text": letter_clean, "title": letter_title}
 
                     s["state"] = "waiting_vacancy"
                     _touch(user_id)
                     send(user_id,
-                         "💡 Хочешь проверить другую вакансию? "
-                         "Просто пришли новую ссылку — резюме сохранено 📎\n"
-                         "Нужно сопроводительное письмо? Отправь /письмо\n"
-                         "Нужно и то и другое? Отправь /оба\n"
+                         "💡 Резюме и письмо готовы! Пришли новую ссылку для другой вакансии.\n"
                          "Для нового резюме отправь /сброс")
-                    logger.info("✅ Done for user %s | score=%d | fallback=%s",
-                                user_id, score, metadata.get("fallback_used"))
+                    logger.info("✅ Both (auto) done for user %s | resume_score=%d | letter_fallback=%s",
+                                user_id, score, l_meta.get("fallback_used"))
 
             except Exception as e:
                 logger.exception("❌ _process() error for user %s: %s", user_id, e)
@@ -828,7 +864,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         return
 
     if cmd in ("/здоровье", "/health"):
-        send(user_id, f"✅ Бот работает! Версия 5.5\nАктивных сессий: {len(_sessions)}")
+        send(user_id, f"✅ Бот работает! Версия 5.6\nАктивных сессий: {len(_sessions)}")
         return
 
     if cmd in ("/статус", "/status", "статус"):
@@ -980,7 +1016,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "5.3.0",
+        "version": "5.6",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -1008,7 +1044,7 @@ def validate_endpoint():
 
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v5.3...")
+    logger.info("🚀 Starting ResumePro AI bot v5.6...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False)
