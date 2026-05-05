@@ -1,7 +1,7 @@
 # utils/validation.py
 """
 Утилиты для валидации сущностей и обнаружения галлюцинаций.
-Версия: 5.0
+Версия: 5.1 (fixed: only critical issues block output)
 """
 
 import re
@@ -460,7 +460,8 @@ def validate_resume_facts(original_text: str, adapted_text: str) -> Dict[str, An
       ⚠️  WARNING   — new tech skills or many new soft skills
       ℹ️  INFO      — minor stylistic additions (≤2 new soft skills)
 
-    is_safe = True only when there are zero CRITICAL or WARNING issues.
+    is_safe = True only when there are zero CRITICAL issues.
+    Warnings and info issues reduce confidence but do NOT block the result.
     confidence  ∈ [0.0, 1.0]: probability estimate that the text is clean.
     """
     issues: List[str] = []
@@ -526,8 +527,10 @@ def validate_resume_facts(original_text: str, adapted_text: str) -> Dict[str, An
         penalty += 0.2 * len(truly_new_projects)
 
     # ── Result ────────────────────────────────────────────────────────────────
-    critical_or_warning = [i for i in issues if i.startswith("🚨") or i.startswith("⚠️")]
-    is_safe = len(critical_or_warning) == 0
+    # FIX: Only critical issues (🚨) block the result.
+    # Warnings (⚠️) and info (ℹ️) only reduce confidence, but the adapted text is still delivered.
+    critical_only = [i for i in issues if i.startswith("🚨")]
+    is_safe = len(critical_only) == 0
     confidence = max(0.0, round(1.0 - min(penalty, 1.0), 3))
 
     return {
@@ -546,13 +549,14 @@ def get_validation_summary(result: Dict[str, Any]) -> str:
     if result["is_safe"]:
         conf = result["confidence"] * 100
         extra = ""
-        if result["issues"]:  # only INFO issues
+        if result["issues"]:  # only INFO/WARNING issues
             extra = "\n  " + "\n  ".join(result["issues"])
         return f"✅ Валидация пройдена (уверенность: {conf:.0f}%){extra}"
 
     summary_lines = [
-        f"❌ Обнаружены галлюцинации (уверенность: {result['confidence'] * 100:.0f}%):"
+        f"❌ Обнаружены критические галлюцинации (уверенность: {result['confidence'] * 100:.0f}%):"
     ]
     for issue in result["issues"]:
-        summary_lines.append(f"  {issue}")
+        if issue.startswith("🚨"):
+            summary_lines.append(f"  {issue}")
     return "\n".join(summary_lines)
