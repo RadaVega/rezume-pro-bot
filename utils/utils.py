@@ -13,6 +13,14 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from docx import Document
 
+# Пытаемся импортировать cloudscraper для обхода Cloudflare (Rabota.ru)
+try:
+    import cloudscraper
+    CLOUDSCRAPER_AVAILABLE = True
+except ImportError:
+    CLOUDSCRAPER_AVAILABLE = False
+    logging.getLogger(__name__).warning("cloudscraper not installed, Rabota.ru parsing may fail on Cloudflare")
+
 logger = logging.getLogger(__name__)
 
 # ── Shared browser headers (modern Chrome, anti‑bot) ─────────────────────────
@@ -97,6 +105,8 @@ def scrape_any_vacancy(url: str) -> str:
         return parse_hh_vacancy(url)
     elif "superjob" in url_lower:
         return parse_superjob_vacancy(url)
+    elif "habr.com" in url_lower and "/vacancies/" in url_lower:
+        return parse_habr_vacancy(url)
     elif "rabota.ru" in url_lower:
         return parse_rabota_vacancy(url)
     elif "linkedin.com" in url_lower:
@@ -271,44 +281,34 @@ def parse_superjob_vacancy(url: str) -> str:
         logger.error("SuperJob parse error: %s", e, exc_info=True)
         return f"Error: {e}"
 
-# ── Rabota.ru parser (improved headers) ─────────────────────────────────────
+# ── Rabota.ru parser (with cloudscraper fallback) ───────────────────────────
 
 def parse_rabota_vacancy(url: str) -> str:
+    """
+    Парсинг вакансии с rabota.ru с обходом Cloudflare (если установлен cloudscraper).
+    """
     try:
         if "rabota.ru" not in url.lower():
             return "Error: URL does not appear to be a rabota.ru vacancy"
+
         time.sleep(random.uniform(0.5, 1.5))
-        session = requests.Session()
-        session.headers.update(_BROWSER_HEADERS)
-        try:
-            resp = session.get(url, timeout=15, allow_redirects=True)
-            resp.raise_for_status()
-        except requests.Timeout:
-            return "Error: Таймаут при загрузке Rabota.ru"
-        except requests.HTTPError as e:
-            return f"Error: HTTP {e.response.status_code} fetching Rabota.ru vacancy"
-        except requests.RequestException as e:
-            return f"Error: network error fetching Rabota.ru vacancy: {e}"
+
+        # Используем cloudscraper если доступен, иначе обычный requests
+        if CLOUDSCRAPER_AVAILABLE:
+            scraper = cloudscraper.create_scraper()
+            scraper.headers.update(_BROWSER_HEADERS)
+            resp = scraper.get(url, timeout=20, allow_redirects=True)
+        else:
+            session = requests.Session()
+            session.headers.update(_BROWSER_HEADERS)
+            resp = session.get(url, timeout=20, allow_redirects=True)
+
+        if resp.status_code != 200:
+            return f"Error: HTTP {resp.status_code} при загрузке Rabota.ru"
+
         soup = BeautifulSoup(resp.text, "lxml")
-        # itemprop microdata
-        title_el = soup.find(attrs={"itemprop": "title"}) or soup.find(attrs={"itemprop": "name"}) or soup.find("h1")
-        desc_el = soup.find(attrs={"itemprop": "description"})
-        title = title_el.get_text(strip=True) if title_el else ""
-        description = desc_el.get_text(" ", strip=True) if desc_el else ""
-        og_title_el = soup.find("meta", property="og:title")
-        salary, company = "", ""
-        if og_title_el:
-            og_t = og_title_el.get("content", "")
-            sal_m  = re.search(r"зарплатой\s+(.+?)(?:,|$)", og_t, re.IGNORECASE)
-            comp_m = re.search(r"работа в компании\s+(.+?)$", og_t, re.IGNORECASE)
-            if sal_m:
-                salary = sal_m.group(1).strip()
-            if comp_m:
-                company = comp_m.group(1).strip()
-        if title and description:
-            logger.info("✅ Rabota.ru parsed via itemprop: %s", title)
-            return _format_vacancy(title=title, company=company, salary=salary, description=description)
-        # JSON‑LD
+
+        # 1. JSON‑LD
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
@@ -320,20 +320,85 @@ def parse_rabota_vacancy(url: str) -> str:
             org = data.get("hiringOrganization", {})
             company = org.get("name", "").strip() if isinstance(org, dict) else ""
             description = BeautifulSoup(data.get("description", ""), "html.parser").get_text(" ", strip=True)
-            return _format_vacancy(title=title, company=company, description=description)
-        # og tags
-        og_desc_el = soup.find("meta", property="og:description")
-        h1 = soup.find("h1")
-        title = (h1.get_text(strip=True) if h1 else "") or (
-            og_title_el.get("content", "").split(" в ")[0].strip() if og_title_el else ""
-        )
-        description = og_desc_el.get("content", "") if og_desc_el else ""
-        if not title:
-            return "Error: не удалось распознать вакансию Rabota.ru"
-        logger.info("✅ Rabota.ru parsed via og-tags: %s", title)
-        return _format_vacancy(title=title, description=description)
+            # извлекаем зарплату
+            salary = ""
+            sal = data.get("baseSalary", {})
+            if sal:
+                value = sal.get("value", {})
+                min_sal = value.get("minValue")
+                max_sal = value.get("maxValue")
+                if min_sal and max_sal:
+                    salary = f"от {min_sal} до {max_sal} руб."
+                elif min_sal:
+                    salary = f"от {min_sal} руб."
+                elif max_sal:
+                    salary = f"до {max_sal} руб."
+            return _format_vacancy(title=title, company=company, salary=salary, description=description)
+
+        # 2. Микроразметка itemprop
+        title_el = soup.find(attrs={"itemprop": "title"}) or soup.find(attrs={"itemprop": "name"}) or soup.find("h1")
+        desc_el = soup.find(attrs={"itemprop": "description"})
+        if title_el and desc_el:
+            title = title_el.get_text(strip=True)
+            description = desc_el.get_text(" ", strip=True)
+            return _format_vacancy(title=title, description=description)
+
+        # 3. Open Graph
+        og_title = soup.find("meta", property="og:title")
+        og_desc = soup.find("meta", property="og:description")
+        if og_title:
+            title = og_title.get("content", "").strip()
+            description = og_desc.get("content", "").strip() if og_desc else ""
+            return _format_vacancy(title=title, description=description)
+
+        return "Error: не удалось распознать вакансию Rabota.ru"
+
     except Exception as e:
-        logger.error("Rabota.ru parse error: %s", e)
+        logger.error("Rabota.ru parse error: %s", e, exc_info=True)
+        return f"Error: {e}"
+
+# ── Habr Jobs parser (new) ──────────────────────────────────────────────────
+
+def parse_habr_vacancy(url: str) -> str:
+    """
+    Парсинг вакансии с habr.com (https://habr.com/ru/companies/*/vacancies/*)
+    """
+    try:
+        if "habr.com" not in url.lower() or "/vacancies/" not in url.lower():
+            return "Error: URL does not appear to be a Habr vacancy"
+
+        time.sleep(random.uniform(0.5, 1.0))
+        session = requests.Session()
+        session.headers.update(_BROWSER_HEADERS)
+
+        resp = session.get(url, timeout=15, allow_redirects=True)
+        if resp.status_code != 200:
+            return f"Error: HTTP {resp.status_code} при загрузке Habr"
+
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Заголовок – обычно h1
+        title_el = soup.find("h1")
+        title = title_el.get_text(strip=True) if title_el else ""
+
+        # Компания – в ссылке с текстом компании или в span
+        company_el = soup.find("a", class_=re.compile(r"company", re.I)) or soup.find("span", class_=re.compile(r"company", re.I))
+        company = company_el.get_text(strip=True) if company_el else ""
+
+        # Описание – ищем div с классом "job-description", "vacancy-description", "content" или просто article
+        desc_el = soup.find("div", class_=re.compile(r"job-description|vacancy-description|content", re.I)) or soup.find("article")
+        description = desc_el.get_text(" ", strip=True) if desc_el else ""
+
+        # Очистка от лишних пробелов
+        description = re.sub(r'\s+', ' ', description).strip()
+
+        if not title and not description:
+            return "Error: не удалось распознать вакансию Habr"
+
+        return _format_vacancy(title=title, company=company, description=description)
+
+    except Exception as e:
+        logger.error("Habr parse error: %s", e, exc_info=True)
         return f"Error: {e}"
 
 # ── LinkedIn parser ──────────────────────────────────────────────────────────
