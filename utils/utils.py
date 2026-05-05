@@ -647,6 +647,16 @@ def is_linkedin_url(url: str) -> bool:
     return "linkedin.com" in url.lower()
 
 
+def is_superjob_url(url: str) -> bool:
+    """Check if a URL belongs to SuperJob."""
+    return "superjob.ru" in url.lower()
+
+
+def is_rabota_url(url: str) -> bool:
+    """Check if a URL belongs to Rabota.ru."""
+    return "rabota.ru" in url.lower()
+
+
 def _dqa(soup: BeautifulSoup, data_qa: str) -> str:
     """Return stripped text for the first element with data-qa=<value>."""
     el = soup.find(attrs={"data-qa": data_qa})
