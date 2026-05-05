@@ -1,7 +1,7 @@
 # services/resume_generator.py
 """
 Сервис генерации резюме с защитой от галлюцинаций.
-Версия: 5.1
+Версия: 5.2
 """
 
 import logging
@@ -27,13 +27,12 @@ class AntiHallucinationGenerator:
 
     def _call_gigachat(self, prompt: str) -> str:
         """
-        Call GigaChat with proper message format.
-        Uses the SDK's expected structure: list of dicts with 'role' and 'content'.
-        No temperature parameter – it's not supported in this SDK version.
+        Call GigaChat with a plain string prompt (old SDK style).
+        This matches the actual gigachat package version (0.1.x) which
+        does NOT accept the messages list format.
         """
         try:
-            messages = [{"role": "user", "content": prompt}]
-            response = self.gigachat.chat(messages)
+            response = self.gigachat.chat(prompt)
         except Exception as e:
             logger.error(f"GigaChat call failed: {e}")
             return ""
@@ -163,7 +162,7 @@ class AntiHallucinationGenerator:
                     )
 
                 # ── Generate ──────────────────────────────────────────────────
-                adapted_text = self._call_gigachat(prompt)  # removed temperature
+                adapted_text = self._call_gigachat(prompt)  # plain string prompt
                 if not adapted_text:
                     logger.warning(f"⚠️ Empty response on attempt {attempt + 1}")
                     continue
@@ -237,7 +236,7 @@ class AntiHallucinationGenerator:
                     )
                 )
 
-                letter_text = self._call_gigachat(prompt)  # removed temperature
+                letter_text = self._call_gigachat(prompt)  # plain string prompt
                 if not letter_text:
                     continue
 
