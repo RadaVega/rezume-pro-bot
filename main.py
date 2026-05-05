@@ -5,12 +5,10 @@ Bilingual: detects vacancy language (EN/RU) and outputs in same language.
 Strict anti‑hallucination rules.
 """
 
-# ── Package path: .pkgs/ is pre-installed during the Build stage ──────────────
 import sys as _sys, os as _os
 _PKGS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".pkgs")
 if _os.path.isdir(_PKGS) and _PKGS not in _sys.path:
     _sys.path.insert(0, _PKGS)
-# ─────────────────────────────────────────────────────────────────────────────
 
 import os
 import re
@@ -37,7 +35,6 @@ from utils.validation import get_validation_summary, extract_entities, _scan_tec
 from utils.pdf_generator import text_to_pdf
 from config.settings import Config
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=getattr(logging, Config.LOG_LEVEL, "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -46,7 +43,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ── VK ────────────────────────────────────────────────────────────────────────
 logger.info("🔄 Connecting to VK...")
 vk_session = VkApi(token=os.getenv("VK_TOKEN"))
 
@@ -55,13 +51,11 @@ if not Config.VK_GROUP_ID:
     raise ValueError("VK_GROUP_ID is required")
 logger.info("✅ VK Group ID: %s", Config.VK_GROUP_ID)
 
-# ── GigaChat ──────────────────────────────────────────────────────────────────
 logger.info("🔄 Connecting to GigaChat...")
 gigachat = GigaChat(credentials=Config.GIGACHAT_API_KEY, verify_ssl_certs=False)
 generator = AntiHallucinationGenerator(gigachat, max_retries=Config.MAX_RETRIES)
 logger.info("✅ Bot ready. Group: %s", Config.VK_GROUP_ID)
 
-# ── Message deduplication ─────────────────────────────────────────────────────
 _seen_msg_ids: OrderedDict = OrderedDict()
 _MSG_TTL = 60
 _MSG_CACHE_MAX = 2000
@@ -79,7 +73,6 @@ def _is_duplicate_message(message_id: int) -> bool:
         _seen_msg_ids.popitem(last=False)
     return False
 
-# ── User session store ────────────────────────────────────────────────────────
 _sessions: dict = {}
 _SESSION_TTL = 3600
 
@@ -114,7 +107,6 @@ def _session_cleanup() -> None:
         if expired:
             logger.debug("🧹 Cleaned %d expired sessions", len(expired))
 
-# ── Static messages ───────────────────────────────────────────────────────────
 GREETING = (
     "👋 Привет! Я бот Резюме.Про 🎯\n"
     "Я помогу адаптировать твоё резюме под вакансию за 30 секунд с помощью ИИ.\n\n"
@@ -340,10 +332,6 @@ def build_score_report(resume_text: str, vacancy_text: str) -> str:
     return "\n".join(lines)
 
 def detect_language(text: str) -> str:
-    """
-    Detect whether the vacancy text is in English or Russian.
-    Returns 'en' or 'ru'.
-    """
     if not text:
         return "ru"
     cyrillic = sum(1 for ch in text if 'а' <= ch.lower() <= 'я')
@@ -600,7 +588,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     except Exception as e:
                         logger.exception("❌ Generation error in auto mode: %s", e)
                         send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
-                        s["state"] = "waiting_vacancy")
+                        s["state"] = "waiting_vacancy"   # <-- FIXED: removed extra parenthesis
 
             except Exception as e:
                 logger.exception("❌ _process() outer error for user %s: %s", user_id, e)
@@ -706,7 +694,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             send(user_id, "📭 Нет сохранённых файлов для повторной отправки.\n\nПришли ссылку на вакансию с hh.ru — и я сгенерирую документы.\nДля резюме + письма сразу используй /оба")
             return
         if s.get("state") == "processing":
-            send(user_id, "⏳ Уже обрабатываю запрос, подожди немного.")
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
             return
         send(user_id, "📤 Повторно отправляю файлы...")
         if has_resume:
