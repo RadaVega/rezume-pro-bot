@@ -1,0 +1,8 @@
+#!/bin/bash
+cd ~/21-school/rezume-pro-bot
+source .venv/bin/activate
+export VK_TOKEN="vk1.a.pIx4sd4g8lVkSk-o5AH1oxZIWa-JATn2YNhMmDKNi_31fSgaFBFh4vdYhrBgu4e_GnC-FXDygTBfMyS7PLt_BaFmWF_MkX3j_bGrOhhHye86bmzntU3eD-5GoqCCyWg4q-Z6TCbV7wDXa2H7aHMMuVdcpqlG00fQVD4Huj8-KHNLjbGntqZx10O4FIpklqD6dsR4CYJYik9PUGLnVsXTrg"
+export VK_GROUP_ID="237022345"
+export GIGACHAT_API_KEY="MDE5ZDJmOWUtOWNkNy03NzdjLWE0NGUtMWYwMzk3YjBiYWU5OjM4M2Q3YmYyLTk1ZTAtNDJmNy04YTYxLTM5MTQ5NWExZTgzNw=="
+export GIGA_SCOPE="GIGACHAT_API_PERS"
+python main.py

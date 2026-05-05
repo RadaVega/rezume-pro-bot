@@ -42,6 +42,7 @@ from gigachat import GigaChat
 from services.resume_generator import AntiHallucinationGenerator
 from utils.utils import extract_text_from_file, parse_hh_vacancy, clean_markdown
 from utils.validation import get_validation_summary, extract_entities, _scan_tech_skills, TECH_SKILLS
+from utils.pdf_generator import text_to_pdf
 from config.settings import Config
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -143,6 +144,7 @@ GREETING = (
     "• /письмо   — написать сопроводительное письмо\n"
     "• /оба      — резюме + письмо одновременно\n"
     "• /статус   — показать текущее состояние сессии\n"
+    "• /скачать  — повторно получить последние PDF-файлы\n"
     "• /сброс    — начать заново\n\n"
     "Проект Школы 21 • Готов помочь! 🚀"
 )
@@ -224,6 +226,76 @@ def send(user_id: int, text: str) -> bool:
     except Exception as e:
         logger.exception("❌ send() unexpected error → user %s: %s", user_id, e)
         return False
+
+
+def send_document(user_id: int, file_path: str, title: str) -> bool:
+    """
+    Upload a file as a VK document and send it to the user as an attachment.
+    Uses the low-level VK docs API so no extra wrapper is needed.
+    """
+    try:
+        vk = vk_session.get_api()
+
+        upload_info = vk.docs.getMessagesUploadServer(peer_id=user_id, type="doc")
+        upload_url = upload_info["upload_url"]
+
+        with open(file_path, "rb") as f:
+            resp = http_requests.post(
+                upload_url,
+                files={"file": (title + ".pdf", f, "application/pdf")},
+                timeout=60,
+            )
+        resp.raise_for_status()
+        file_key = resp.json().get("file", "")
+        if not file_key:
+            raise ValueError(f"VK upload returned no file key: {resp.text}")
+
+        saved = vk.docs.save(file=file_key, title=title)
+        doc = saved.get("doc") or (saved[0] if isinstance(saved, list) else None)
+        if not doc:
+            raise ValueError(f"VK docs.save returned unexpected format: {saved}")
+
+        attachment = f"doc{doc['owner_id']}_{doc['id']}"
+        vk_session.method(
+            "messages.send",
+            {
+                "user_id": user_id,
+                "attachment": attachment,
+                "message": "",
+                "random_id": random.randint(1, 2_147_483_647),
+            },
+        )
+        logger.info("✅ Document sent to user %s: '%s'", user_id, title)
+        return True
+
+    except VkApiError as e:
+        logger.error("❌ VK API error in send_document → user %s | code=%s | %s", user_id, e.code, e)
+        return False
+    except Exception as e:
+        logger.exception("❌ send_document() error → user %s: %s", user_id, e)
+        return False
+
+
+def _send_pdf_or_text(user_id: int, text: str, title: str, fallback_header: str) -> None:
+    """
+    Try to send text as a PDF attachment.
+    Falls back to sending plain text if PDF generation or upload fails.
+    """
+    pdf_path = None
+    try:
+        pdf_path = text_to_pdf(text, title)
+        ok = send_document(user_id, pdf_path, title)
+        if not ok:
+            raise RuntimeError("send_document returned False")
+    except Exception as e:
+        logger.warning("⚠️ PDF send failed (%s), falling back to text", e)
+        send(user_id, fallback_header + text)
+    finally:
+        if pdf_path:
+            try:
+                os.unlink(pdf_path)
+            except OSError:
+                pass
 
 
 def download_file(url: str, ext: str) -> str:
@@ -434,9 +506,19 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     # ── Cover letter only ─────────────────────────────────────
                     letter, metadata = generator.generate_cover_letter(s["resume_text"], vacancy_text)
                     letter_clean = clean_markdown(letter)
-                    header = "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" \
-                        if metadata.get("fallback_used") else "✉️ Сопроводительное письмо готово!\n\n"
-                    send(user_id, header + letter_clean)
+                    if metadata.get("fallback_used"):
+                        send(user_id, "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" + letter_clean)
+                    else:
+                        send(user_id, "✉️ Генерирую PDF сопроводительного письма...")
+                        fname = s.get("resume_filename", "резюме").rsplit(".", 1)[0]
+                        letter_title = f"Сопроводительное письмо — {fname}"
+                        _send_pdf_or_text(
+                            user_id,
+                            letter_clean,
+                            title=letter_title,
+                            fallback_header="✉️ Сопроводительное письмо:\n\n",
+                        )
+                        s["last_letter_pdf"] = {"text": letter_clean, "title": letter_title}
                     s["state"] = "waiting_vacancy"
                     _touch(user_id)
                     send(user_id,
@@ -473,22 +555,43 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     r_meta = resume_result.get("meta", {})
                     conf = r_meta.get("validation", {}).get("confidence", 1.0)
                     score = ats_score(conf)
+                    fname = s.get("resume_filename", "резюме").rsplit(".", 1)[0]
                     if r_meta.get("fallback_used"):
-                        r_header = "⚠️ Не удалось адаптировать резюме. Возвращаем оригинал.\n\n"
+                        r_body = "⚠️ Не удалось адаптировать резюме. Возвращаем оригинал.\n\n" + adapted_clean
+                        info_notes = [i for i in r_meta.get("issues", []) if i.startswith("ℹ️")]
+                        if info_notes:
+                            r_body += "\n\n" + "\n".join(info_notes)
+                        send(user_id, r_body)
                     else:
-                        r_header = f"✅ Резюме адаптировано!\n📊 Match Score: {score}/100\n\n"
-                    r_body = r_header + adapted_clean
-                    info_notes = [i for i in r_meta.get("issues", []) if i.startswith("ℹ️")]
-                    if info_notes:
-                        r_body += "\n\n" + "\n".join(info_notes)
-                    send(user_id, r_body)
+                        send(user_id, f"✅ Генерирую PDF резюме (Match Score: {score}/100)...")
+                        resume_pdf_text = adapted_clean
+                        info_notes = [i for i in r_meta.get("issues", []) if i.startswith("ℹ️")]
+                        if info_notes:
+                            resume_pdf_text += "\n\n" + "\n".join(info_notes)
+                        resume_title = f"Адаптированное резюме — {fname}"
+                        _send_pdf_or_text(
+                            user_id,
+                            resume_pdf_text,
+                            title=resume_title,
+                            fallback_header=f"✅ Резюме адаптировано! Match Score: {score}/100\n\n",
+                        )
+                        s["last_resume_pdf"] = {"text": resume_pdf_text, "title": resume_title}
 
                     # Send cover letter second
                     letter_clean = clean_markdown(letter_result.get("text", ""))
                     l_meta = letter_result.get("meta", {})
-                    l_header = "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" \
-                        if l_meta.get("fallback_used") else "✉️ Сопроводительное письмо:\n\n"
-                    send(user_id, l_header + letter_clean)
+                    if l_meta.get("fallback_used"):
+                        send(user_id, "⚠️ Не удалось сгенерировать письмо — возвращаем заготовку.\n\n" + letter_clean)
+                    else:
+                        send(user_id, "✉️ Генерирую PDF сопроводительного письма...")
+                        letter_title = f"Сопроводительное письмо — {fname}"
+                        _send_pdf_or_text(
+                            user_id,
+                            letter_clean,
+                            title=letter_title,
+                            fallback_header="✉️ Сопроводительное письмо:\n\n",
+                        )
+                        s["last_letter_pdf"] = {"text": letter_clean, "title": letter_title}
 
                     s["state"] = "waiting_vacancy"
                     _touch(user_id)
@@ -504,18 +607,30 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     adapted_clean = clean_markdown(adapted)
                     conf = metadata.get("validation", {}).get("confidence", 1.0)
                     score = ats_score(conf)
+                    fname = s.get("resume_filename", "резюме").rsplit(".", 1)[0]
+
+                    info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
 
                     if metadata.get("fallback_used"):
-                        header = "⚠️ Не удалось безопасно адаптировать резюме.\nВозвращаем оригинал без изменений.\n\n"
+                        body = "⚠️ Не удалось безопасно адаптировать резюме.\nВозвращаем оригинал без изменений.\n\n" + adapted_clean
+                        if info_notes:
+                            body += "\n\n" + "\n".join(info_notes)
+                        send(user_id, body)
                     else:
-                        header = f"✅ Резюме адаптировано!\n📊 Match Score: {score}/100\n\n"
+                        send(user_id, f"✅ Генерирую PDF резюме (Match Score: {score}/100)...")
+                        pdf_text = adapted_clean
+                        if info_notes:
+                            pdf_text += "\n\n" + "\n".join(info_notes)
+                        resume_title = f"Адаптированное резюме — {fname}"
+                        _send_pdf_or_text(
+                            user_id,
+                            pdf_text,
+                            title=resume_title,
+                            fallback_header=f"✅ Резюме адаптировано! Match Score: {score}/100\n\n",
+                        )
+                        s["last_resume_pdf"] = {"text": pdf_text, "title": resume_title}
+                        s["last_letter_pdf"] = None
 
-                    body = header + adapted_clean
-                    info_notes = [i for i in metadata.get("issues", []) if i.startswith("ℹ️")]
-                    if info_notes:
-                        body += "\n\n" + "\n".join(info_notes)
-
-                    send(user_id, body)
                     s["state"] = "waiting_vacancy"
                     _touch(user_id)
                     send(user_id,
@@ -659,6 +774,49 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             lines.append("\nПришли ссылку с hh.ru — или выбери режим (/анализ, /письмо, /оба).")
 
         send(user_id, "\n".join(lines))
+        return
+
+    if cmd in ("/скачать", "/download", "скачать"):
+        has_resume = bool(s.get("last_resume_pdf"))
+        has_letter = bool(s.get("last_letter_pdf"))
+
+        if not has_resume and not has_letter:
+            send(user_id,
+                 "📭 Нет сохранённых файлов для повторной отправки.\n\n"
+                 "Пришли ссылку на вакансию с hh.ru — и я сгенерирую документы.\n"
+                 "Для резюме + письма сразу используй /оба")
+            return
+
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю запрос, подожди немного.")
+            return
+
+        send(user_id, "📤 Повторно отправляю файлы...")
+
+        if has_resume:
+            r = s["last_resume_pdf"]
+            _send_pdf_or_text(
+                user_id,
+                r["text"],
+                title=r["title"],
+                fallback_header="📄 Адаптированное резюме:\n\n",
+            )
+
+        if has_letter:
+            l = s["last_letter_pdf"]
+            _send_pdf_or_text(
+                user_id,
+                l["text"],
+                title=l["title"],
+                fallback_header="✉️ Сопроводительное письмо:\n\n",
+            )
+
+        parts = []
+        if has_resume:
+            parts.append("резюме")
+        if has_letter:
+            parts.append("письмо")
+        send(user_id, f"✅ Готово! Отправил: {' и '.join(parts)}.")
         return
 
     # ── 4. Fallthrough ────────────────────────────────────────────────────────

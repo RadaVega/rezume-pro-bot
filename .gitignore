@@ -176,3 +176,19 @@ pyproject.toml
 main.py.backup
 generated-icon.png
 .pkgs/
+
+# Replit-specific
+.replit
+replit.md
+replit.nix
+.claude.md
+
+# Generated/uploaded
+attached_assets/
+hallucination_test_report.json
+structure.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
