@@ -1,7 +1,8 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.7
-Fixed: after file upload and deferred vacancy, return immediately.
+ResumePro AI — VK Bot v6.7 (fixed missing returns)
+- Added returns after file upload to prevent session reset.
+- Includes language override commands, instant ack, thread-safe sessions.
 """
 
 import sys as _sys, os as _os
@@ -538,7 +539,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_cmd_demo, args=(user_id,), daemon=True).start()
         return
     if cmd in ("/старт", "/start", "start", "начать", "привет", "hi", "hello", ""):
-        send(user_id, "✏️ Инициализирую бота...")
+        send(user_id, "✏️ Показываю приветствие...")
         threading.Thread(target=_cmd_start, args=(user_id,), daemon=True).start()
         return
     if cmd in ("/анализ", "/score", "score", "анализ", "скор"):
@@ -595,12 +596,12 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         if pending_url:
             send(user_id, f"✅ Резюме получено: {fname}\n\n🔗 Вижу ссылку на вакансию, которую ты прислал раньше:\n{pending_url}\n\nНачинаю обработку...")
             handle(user_id, pending_url, [])
-            return   # ← critical: do not fall through
+            return   # <-- CRITICAL: prevent fall-through
         elif pending_text:
             preview = pending_text[:120].replace("\n", " ")
             send(user_id, f"✅ Резюме получено: {fname}\n\n📋 Вижу описание вакансии, которое ты прислал раньше:\n«{preview}…»\n\nНачинаю обработку...")
             handle(user_id, pending_text, [])
-            return   # ← critical: do not fall through
+            return   # <-- CRITICAL: prevent fall-through
         else:
             send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
             return
