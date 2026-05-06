@@ -1,9 +1,7 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.9
-- /start no longer resets session if resume exists
-- Added duplicate protection via state and message_id
-- Stable session persistence
+ResumePro AI — VK Bot v6.7
+Fixed: after file upload and deferred vacancy, return immediately.
 """
 
 import sys as _sys, os as _os
@@ -174,7 +172,7 @@ HELP = (
     "Команды:\n"
     "• /статус   — показать текущее состояние сессии\n"
     "• /сброс    — начать заново\n"
-    "• /старт    — показать приветствие (без сброса резюме)"
+    "• /старт    — вернуться в начало"
 )
 
 DEMO = (
@@ -426,15 +424,8 @@ def _cmd_demo(user_id: int) -> None:
     send(user_id, DEMO)
 
 def _cmd_start(user_id: int) -> None:
-    s = _get_session(user_id)
-    with _session_lock:
-        # НЕ сбрасываем сессию, если резюме уже загружено
-        if s.get("resume_text"):
-            send(user_id, GREETING)
-        else:
-            # Если резюме нет – сбрасываем на всякий случай
-            _clear_session(user_id)
-            send(user_id, GREETING)
+    _clear_session(user_id)
+    send(user_id, GREETING)
 
 def _cmd_score_mode(user_id: int) -> None:
     s = _get_session(user_id)
@@ -479,7 +470,7 @@ def _cmd_letter_mode(user_id: int) -> None:
     send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
 
 def _cmd_health(user_id: int) -> None:
-    send(user_id, f"✅ Бот работает! Версия 6.9\nАктивных сессий: {len(_sessions)}")
+    send(user_id, f"✅ Бот работает! Версия 6.7\nАктивных сессий: {len(_sessions)}")
 
 def _cmd_download(user_id: int) -> None:
     s = _get_session(user_id)
@@ -547,7 +538,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_cmd_demo, args=(user_id,), daemon=True).start()
         return
     if cmd in ("/старт", "/start", "start", "начать", "привет", "hi", "hello", ""):
-        send(user_id, "✏️ Показываю приветствие...")
+        send(user_id, "✏️ Инициализирую бота...")
         threading.Thread(target=_cmd_start, args=(user_id,), daemon=True).start()
         return
     if cmd in ("/анализ", "/score", "score", "анализ", "скор"):
@@ -604,12 +595,12 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         if pending_url:
             send(user_id, f"✅ Резюме получено: {fname}\n\n🔗 Вижу ссылку на вакансию, которую ты прислал раньше:\n{pending_url}\n\nНачинаю обработку...")
             handle(user_id, pending_url, [])
-            return
+            return   # ← critical: do not fall through
         elif pending_text:
             preview = pending_text[:120].replace("\n", " ")
             send(user_id, f"✅ Резюме получено: {fname}\n\n📋 Вижу описание вакансии, которое ты прислал раньше:\n«{preview}…»\n\nНачинаю обработку...")
             handle(user_id, pending_text, [])
-            return
+            return   # ← critical: do not fall through
         else:
             send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
             return
@@ -920,7 +911,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.9",
+        "version": "6.7",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -941,7 +932,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.9...")
+    logger.info("🚀 Starting ResumePro AI bot v6.7...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
