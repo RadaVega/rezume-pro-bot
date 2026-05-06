@@ -1,9 +1,7 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.6
-- Fixed language override persistence.
-- Immediate acknowledgment for all commands (no more 30s hang).
-- Enhanced logging for forced language.
+ResumePro AI — VK Bot v6.7
+Fixed: after file upload and deferred vacancy, return immediately.
 """
 
 import sys as _sys, os as _os
@@ -92,7 +90,7 @@ def _get_session(user_id: int) -> dict:
             "resume_text": None,
             "resume_filename": None,
             "state": "waiting_resume",
-            "forced_lang": None,       # None = auto, "en" or "ru"
+            "forced_lang": None,
             "updated_at": now,
         }
         return _sessions[user_id]
@@ -195,7 +193,6 @@ DEMO = (
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def send(user_id: int, text: str) -> bool:
-    """Synchronous send (blocks). Use for final responses."""
     try:
         if len(text) > 4096:
             text = text[:4093] + "..."
@@ -286,8 +283,9 @@ def extract_hh_url(text: str) -> str:
     m = re.search(r"https?://[^\s]*hh\.ru/vacancy/\d+[^\s]*", text)
     if m:
         return m.group(0).rstrip(".,;!?)")
-    m = re.search(r"hh\.ru/vacancy/\d+", text)
-    return ("https://" + m.group(0)) if m else ""
+    if m := re.search(r"hh\.ru/vacancy/\d+", text):
+        return "https://" + m.group(0)
+    return ""
 
 def extract_any_url(text: str) -> str:
     for m in re.finditer(r"https?://[^\s]+", text):
@@ -371,7 +369,6 @@ def detect_language(text: str, url_hint: str = "") -> str:
 
 # ── Command handlers with instant acknowledgment ─────────────────────────────
 def _cmd_language_set(user_id: int, lang: str) -> None:
-    """Background thread for language change."""
     s = _get_session(user_id)
     with _session_lock:
         s["forced_lang"] = lang
@@ -473,7 +470,7 @@ def _cmd_letter_mode(user_id: int) -> None:
     send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
 
 def _cmd_health(user_id: int) -> None:
-    send(user_id, f"✅ Бот работает! Версия 6.6\nАктивных сессий: {len(_sessions)}")
+    send(user_id, f"✅ Бот работает! Версия 6.7\nАктивных сессий: {len(_sessions)}")
 
 def _cmd_download(user_id: int) -> None:
     s = _get_session(user_id)
@@ -565,7 +562,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_cmd_download, args=(user_id,), daemon=True).start()
         return
 
-    # ── 2. File attachment (no instant ack needed, it's already a file) ───────
+    # ── 2. File attachment (no instant ack needed) ───────────────────────────
     doc = next((a for a in attachments if a.get("type") == "doc"), None)
     if doc:
         info = doc["doc"]
@@ -598,15 +595,17 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         if pending_url:
             send(user_id, f"✅ Резюме получено: {fname}\n\n🔗 Вижу ссылку на вакансию, которую ты прислал раньше:\n{pending_url}\n\nНачинаю обработку...")
             handle(user_id, pending_url, [])
+            return   # ← critical: do not fall through
         elif pending_text:
             preview = pending_text[:120].replace("\n", " ")
             send(user_id, f"✅ Резюме получено: {fname}\n\n📋 Вижу описание вакансии, которое ты прислал раньше:\n«{preview}…»\n\nНачинаю обработку...")
             handle(user_id, pending_text, [])
+            return   # ← critical: do not fall through
         else:
             send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
-        return
+            return
 
-    # ── 3. Vacancy source detection (long processing, already async) ──────────
+    # ── 3. Vacancy source detection (long processing) ────────────────────────
     hh_url = extract_hh_url(text)
     other_url = ""
     pasted_vacancy = ""
@@ -912,7 +911,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.6",
+        "version": "6.7",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -933,7 +932,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.6...")
+    logger.info("🚀 Starting ResumePro AI bot v6.7...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
