@@ -1,8 +1,8 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.4
-- Session lock, forced language commands, improved language detection.
-- LinkedIn forced English, instant webhook response.
+ResumePro AI — VK Bot v6.5
+- Исправлено принудительное применение языка из сессии.
+- Добавлено логирование для отладки.
 """
 
 import sys as _sys, os as _os
@@ -354,26 +354,21 @@ def detect_language(text: str, url_hint: str = "") -> str:
     Улучшенное определение языка вакансии.
     Возвращает 'en' или 'ru'.
     """
-    # 1. Подсказка по URL
     if "linkedin.com" in url_hint.lower():
         return "en"
     if not text:
         return "ru"
-    # 2. Анализ символов
     cyrillic = sum(1 for ch in text if 'а' <= ch.lower() <= 'я')
     latin = sum(1 for ch in text if 'a' <= ch.lower() <= 'z')
-    # 3. Поиск частотных английских слов
     english_words = {"the", "and", "for", "with", "you", "are", "not", "this", "that", "will", "from", "have", "your", "please", "experience", "skills", "requirements"}
     text_lower = text.lower()
     english_score = sum(1 for word in english_words if f" {word} " in text_lower or text_lower.startswith(word + " "))
-    # 4. Решение
     if english_score >= 2:
         return "en"
-    if latin > cyrillic * 1.5:   # латиницы значительно больше
+    if latin > cyrillic * 1.5:
         return "en"
-    if cyrillic > latin * 1.5:   # кириллицы значительно больше
+    if cyrillic > latin * 1.5:
         return "ru"
-    # По умолчанию русский
     return "ru"
 
 # ── Core conversation handler ─────────────────────────────────────────────────
@@ -386,16 +381,19 @@ def handle(user_id: int, text: str, attachments: list) -> None:
     if cmd in ("/язык английский", "/lang en", "/lang english"):
         with _session_lock:
             s["forced_lang"] = "en"
+            logger.info(f"🔧 Forced language set to 'en' for user {user_id}")
         send(user_id, "🌐 Язык установлен на английский. Все выходные документы будут на английском.")
         return
     if cmd in ("/язык русский", "/lang ru", "/lang russian"):
         with _session_lock:
             s["forced_lang"] = "ru"
+            logger.info(f"🔧 Forced language set to 'ru' for user {user_id}")
         send(user_id, "🌐 Язык установлен на русский. Все выходные документы будут на русском.")
         return
     if cmd in ("/язык авто", "/lang auto", "/lang default"):
         with _session_lock:
             s["forced_lang"] = None
+            logger.info(f"🔧 Forced language cleared (auto) for user {user_id}")
         send(user_id, "🌐 Автоматическое определение языка вакансии (по умолчанию).")
         return
 
@@ -531,20 +529,23 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             s["state"] = "waiting_vacancy"
                     return
 
-                # Определение языка с учётом принудительного
-                forced = s.get("forced_lang")
+                # ── Определение языка с учётом принудительного ──────────────────
+                with _session_lock:
+                    forced = s.get("forced_lang")
                 if forced:
                     vacancy_lang = forced
-                    logger.info(f"Using forced language: {vacancy_lang}")
+                    logger.info(f"🔧 Using forced language from session: {forced} (user {user_id})")
                 else:
                     vacancy_lang = detect_language(vacancy_text, vacancy_label)
-                    # Принудительный английский для LinkedIn (даже если forced = None)
+                    # Принудительный английский для LinkedIn (только если нет forced)
                     if "linkedin.com" in vacancy_label:
                         vacancy_lang = "en"
-                        logger.info(f"🔧 LinkedIn detected – forcing language: en")
+                        logger.info(f"🔧 LinkedIn detected – forcing language: en (user {user_id})")
+                    else:
+                        logger.info(f"🌐 Auto-detected language: {vacancy_lang} (user {user_id})")
                 with _session_lock:
                     s["vacancy_lang"] = vacancy_lang
-                logger.info(f"Определён язык вакансии: {vacancy_lang}")
+                logger.info(f"✅ Final language for generation: {vacancy_lang} (user {user_id})")
 
                 if score_mode:
                     report = build_score_report(s["resume_text"], vacancy_text)
@@ -741,7 +742,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
         return
     if cmd in ("/здоровье", "/health"):
-        send(user_id, f"✅ Бот работает! Версия 6.4\nАктивных сессий: {len(_sessions)}")
+        send(user_id, f"✅ Бот работает! Версия 6.5\nАктивных сессий: {len(_sessions)}")
         return
     if cmd in ("/статус", "/status", "статус"):
         with _session_lock:
@@ -766,7 +767,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         else:
             lines.append("📄 Резюме: не загружено")
         lines.append(f"🔄 Режим: {state_label}")
-        lines.append(f"🌐 Язык: {lang_label[forced_lang]}")
+        lines.append(f"🌐 Язык (принудительно): {lang_label[forced_lang]}")
         if last_url:
             lines.append(f"🔗 Последняя вакансия: {last_url}")
         if state == "waiting_resume":
@@ -860,7 +861,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.4",
+        "version": "6.5",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -881,7 +882,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.4...")
+    logger.info("🚀 Starting ResumePro AI bot v6.5...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
