@@ -1,8 +1,9 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.5
-- Исправлено принудительное применение языка из сессии.
-- Добавлено логирование для отладки.
+ResumePro AI — VK Bot v6.6
+- Fixed language override persistence.
+- Immediate acknowledgment for all commands (no more 30s hang).
+- Enhanced logging for forced language.
 """
 
 import sys as _sys, os as _os
@@ -194,6 +195,7 @@ DEMO = (
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def send(user_id: int, text: str) -> bool:
+    """Synchronous send (blocks). Use for final responses."""
     try:
         if len(text) > 4096:
             text = text[:4093] + "..."
@@ -350,10 +352,6 @@ def build_score_report(resume_text: str, vacancy_text: str) -> str:
     return "\n".join(lines)
 
 def detect_language(text: str, url_hint: str = "") -> str:
-    """
-    Улучшенное определение языка вакансии.
-    Возвращает 'en' или 'ru'.
-    """
     if "linkedin.com" in url_hint.lower():
         return "en"
     if not text:
@@ -371,33 +369,203 @@ def detect_language(text: str, url_hint: str = "") -> str:
         return "ru"
     return "ru"
 
+# ── Command handlers with instant acknowledgment ─────────────────────────────
+def _cmd_language_set(user_id: int, lang: str) -> None:
+    """Background thread for language change."""
+    s = _get_session(user_id)
+    with _session_lock:
+        s["forced_lang"] = lang
+    if lang == "en":
+        msg = "🌐 Язык установлен на английский. Все выходные документы будут на английском."
+    elif lang == "ru":
+        msg = "🌐 Язык установлен на русский. Все выходные документы будут на русском."
+    else:
+        msg = "🌐 Автоматическое определение языка вакансии (по умолчанию)."
+    send(user_id, msg)
+
+def _cmd_status(user_id: int) -> None:
+    s = _get_session(user_id)
+    with _session_lock:
+        state = s.get("state", "waiting_resume")
+        resume_file = s.get("resume_filename")
+        resume_len = len(s.get("resume_text") or "")
+        last_url = s.get("last_vacancy_url")
+        forced_lang = s.get("forced_lang")
+    state_labels = {
+        "waiting_resume": "⏳ Ожидание резюме",
+        "waiting_vacancy": "🔗 Ожидание ссылки на вакансию",
+        "waiting_score": "📊 Режим анализа соответствия",
+        "waiting_both": "🚀 Режим: резюме + письмо",
+        "waiting_coverletter": "✉️ Режим сопроводительного письма",
+        "processing": "⚙️ Обрабатываю запрос…",
+    }
+    state_label = state_labels.get(state, state)
+    lang_label = {"en": "английский", "ru": "русский", None: "авто"}
+    lines = ["📋 Состояние сессии:\n"]
+    if resume_file:
+        lines.append(f"📄 Резюме: {resume_file} ({resume_len} символов)")
+    else:
+        lines.append("📄 Резюме: не загружено")
+    lines.append(f"🔄 Режим: {state_label}")
+    lines.append(f"🌐 Язык (принудительно): {lang_label[forced_lang]}")
+    if last_url:
+        lines.append(f"🔗 Последняя вакансия: {last_url}")
+    if state == "waiting_resume":
+        lines.append("\nОтправь файл резюме (PDF или DOCX) чтобы начать.")
+    elif state == "waiting_vacancy":
+        lines.append("\nПришли ссылку с hh.ru — или выбери режим (/анализ, /письмо, /оба).")
+    send(user_id, "\n".join(lines))
+
+def _cmd_reset(user_id: int) -> None:
+    _clear_session(user_id)
+    send(user_id, "🔄 Сессия сброшена.\n\nОтправь новый файл резюме или напиши /старт.")
+
+def _cmd_help(user_id: int) -> None:
+    send(user_id, HELP)
+
+def _cmd_demo(user_id: int) -> None:
+    send(user_id, DEMO)
+
+def _cmd_start(user_id: int) -> None:
+    _clear_session(user_id)
+    send(user_id, GREETING)
+
+def _cmd_score_mode(user_id: int) -> None:
+    s = _get_session(user_id)
+    if not s.get("resume_text"):
+        send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /анализ.")
+        return
+    with _session_lock:
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+        s["state"] = "waiting_score"
+    _touch(user_id)
+    fname = s.get("resume_filename", "резюме")
+    send(user_id, f"📊 Режим: анализ соответствия\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я покажу:\n  ✅ какие навыки из резюме совпадают с вакансией\n  ❌ чего не хватает\n  💡 что стоит выделить или доучить\n\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
+
+def _cmd_both_mode(user_id: int) -> None:
+    s = _get_session(user_id)
+    if not s.get("resume_text"):
+        send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /оба.")
+        return
+    with _session_lock:
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+        s["state"] = "waiting_both"
+    _touch(user_id)
+    fname = s.get("resume_filename", "резюме")
+    send(user_id, f"🚀 Режим: резюме + письмо\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я сразу подготовлю\nадаптированное резюме и сопроводительное письмо.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
+
+def _cmd_letter_mode(user_id: int) -> None:
+    s = _get_session(user_id)
+    if not s.get("resume_text"):
+        send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /письмо.")
+        return
+    with _session_lock:
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+        s["state"] = "waiting_coverletter"
+    _touch(user_id)
+    fname = s.get("resume_filename", "резюме")
+    send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
+
+def _cmd_health(user_id: int) -> None:
+    send(user_id, f"✅ Бот работает! Версия 6.6\nАктивных сессий: {len(_sessions)}")
+
+def _cmd_download(user_id: int) -> None:
+    s = _get_session(user_id)
+    with _session_lock:
+        has_resume = bool(s.get("last_resume_pdf"))
+        has_letter = bool(s.get("last_letter_pdf"))
+    if not has_resume and not has_letter:
+        send(user_id, "📭 Нет сохранённых файлов для повторной отправки.\n\nПришли ссылку на вакансию с hh.ru — и я сгенерирую документы.\nДля резюме + письма сразу используй /оба")
+        return
+    with _session_lock:
+        if s.get("state") == "processing":
+            send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
+            return
+    send(user_id, "📤 Повторно отправляю файлы...")
+    if has_resume:
+        with _session_lock:
+            r = s["last_resume_pdf"]
+        _send_pdf_or_text(user_id, r["text"], title=r["title"], fallback_header="📄 Адаптированное резюме:\n\n")
+    if has_letter:
+        with _session_lock:
+            l = s["last_letter_pdf"]
+        _send_pdf_or_text(user_id, l["text"], title=l["title"], fallback_header="✉️ Сопроводительное письмо:\n\n")
+    parts = []
+    if has_resume:
+        parts.append("резюме")
+    if has_letter:
+        parts.append("письмо")
+    send(user_id, f"✅ Готово! Отправил: {' и '.join(parts)}.")
+
 # ── Core conversation handler ─────────────────────────────────────────────────
 
 def handle(user_id: int, text: str, attachments: list) -> None:
     s = _get_session(user_id)
     cmd = text.lower().strip()
 
-    # ── 0. Language override commands ────────────────────────────────────────
+    # ── 0. Language override commands (instant ack) ──────────────────────────
     if cmd in ("/язык английский", "/lang en", "/lang english"):
-        with _session_lock:
-            s["forced_lang"] = "en"
-            logger.info(f"🔧 Forced language set to 'en' for user {user_id}")
-        send(user_id, "🌐 Язык установлен на английский. Все выходные документы будут на английском.")
+        send(user_id, "✏️ Принято, устанавливаю английский язык...")
+        threading.Thread(target=_cmd_language_set, args=(user_id, "en"), daemon=True).start()
         return
     if cmd in ("/язык русский", "/lang ru", "/lang russian"):
-        with _session_lock:
-            s["forced_lang"] = "ru"
-            logger.info(f"🔧 Forced language set to 'ru' for user {user_id}")
-        send(user_id, "🌐 Язык установлен на русский. Все выходные документы будут на русском.")
+        send(user_id, "✏️ Принято, устанавливаю русский язык...")
+        threading.Thread(target=_cmd_language_set, args=(user_id, "ru"), daemon=True).start()
         return
     if cmd in ("/язык авто", "/lang auto", "/lang default"):
-        with _session_lock:
-            s["forced_lang"] = None
-            logger.info(f"🔧 Forced language cleared (auto) for user {user_id}")
-        send(user_id, "🌐 Автоматическое определение языка вакансии (по умолчанию).")
+        send(user_id, "✏️ Принято, включаю автоматическое определение языка...")
+        threading.Thread(target=_cmd_language_set, args=(user_id, None), daemon=True).start()
         return
 
-    # ── 1. File attachment ───────────────────────────────────────────────────
+    # ── 1. Other commands with instant ack ───────────────────────────────────
+    if cmd in ("/статус", "/status", "статус"):
+        send(user_id, "✏️ Собираю информацию...")
+        threading.Thread(target=_cmd_status, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/сброс", "/reset", "reset", "сброс"):
+        send(user_id, "✏️ Сбрасываю сессию...")
+        threading.Thread(target=_cmd_reset, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/помощь", "/help", "help", "помощь"):
+        send(user_id, "✏️ Открываю справку...")
+        threading.Thread(target=_cmd_help, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/пример", "/demo", "demo", "пример"):
+        send(user_id, "✏️ Показываю пример...")
+        threading.Thread(target=_cmd_demo, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/старт", "/start", "start", "начать", "привет", "hi", "hello", ""):
+        send(user_id, "✏️ Инициализирую бота...")
+        threading.Thread(target=_cmd_start, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/анализ", "/score", "score", "анализ", "скор"):
+        send(user_id, "✏️ Переключаю в режим анализа...")
+        threading.Thread(target=_cmd_score_mode, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/оба", "/both", "both", "оба", "всё"):
+        send(user_id, "✏️ Переключаю в режим резюме+письмо...")
+        threading.Thread(target=_cmd_both_mode, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/письмо", "/coverletter", "coverletter", "письмо", "сопроводительное"):
+        send(user_id, "✏️ Переключаю в режим письма...")
+        threading.Thread(target=_cmd_letter_mode, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/здоровье", "/health"):
+        send(user_id, "✏️ Проверяю состояние...")
+        threading.Thread(target=_cmd_health, args=(user_id,), daemon=True).start()
+        return
+    if cmd in ("/скачать", "/download", "скачать"):
+        send(user_id, "✏️ Повторно отправляю файлы...")
+        threading.Thread(target=_cmd_download, args=(user_id,), daemon=True).start()
+        return
+
+    # ── 2. File attachment (no instant ack needed, it's already a file) ───────
     doc = next((a for a in attachments if a.get("type") == "doc"), None)
     if doc:
         info = doc["doc"]
@@ -438,7 +606,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
         return
 
-    # ── 2. Vacancy source detection ───────────────────────────────────────────
+    # ── 3. Vacancy source detection (long processing, already async) ──────────
     hh_url = extract_hh_url(text)
     other_url = ""
     pasted_vacancy = ""
@@ -506,6 +674,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             vacancy_label = "(текст вакансии)"
             source_name = "вставленного текста"
 
+        # Send immediate "processing" message
         if score_mode:
             send(user_id, "⏳ Анализирую соответствие резюме вакансии...\nОбычно это занимает несколько секунд.")
         elif coverletter_mode:
@@ -529,7 +698,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             s["state"] = "waiting_vacancy"
                     return
 
-                # ── Определение языка с учётом принудительного ──────────────────
+                # Language determination with forced override
                 with _session_lock:
                     forced = s.get("forced_lang")
                 if forced:
@@ -537,7 +706,6 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                     logger.info(f"🔧 Using forced language from session: {forced} (user {user_id})")
                 else:
                     vacancy_lang = detect_language(vacancy_text, vacancy_label)
-                    # Принудительный английский для LinkedIn (только если нет forced)
                     if "linkedin.com" in vacancy_label:
                         vacancy_lang = "en"
                         logger.info(f"🔧 LinkedIn detected – forcing language: en (user {user_id})")
@@ -687,124 +855,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_process, daemon=True).start()
         return
 
-    # ── 3. Other commands ─────────────────────────────────────────────────────
-    if cmd in ("/старт", "/start", "start", "начать", "привет", "hi", "hello", ""):
-        _clear_session(user_id)
-        send(user_id, GREETING)
-        return
-    if cmd in ("/помощь", "/help", "help", "помощь"):
-        send(user_id, HELP)
-        return
-    if cmd in ("/пример", "/demo", "demo", "пример"):
-        send(user_id, DEMO)
-        return
-    if cmd in ("/сброс", "/reset", "reset", "сброс"):
-        _clear_session(user_id)
-        send(user_id, "🔄 Сессия сброшена.\n\nОтправь новый файл резюме или напиши /старт.")
-        return
-    if cmd in ("/анализ", "/score", "score", "анализ", "скор"):
-        if not s.get("resume_text"):
-            send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /анализ.")
-            return
-        with _session_lock:
-            if s.get("state") == "processing":
-                send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
-                return
-            s["state"] = "waiting_score"
-        _touch(user_id)
-        fname = s.get("resume_filename", "резюме")
-        send(user_id, f"📊 Режим: анализ соответствия\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я покажу:\n  ✅ какие навыки из резюме совпадают с вакансией\n  ❌ чего не хватает\n  💡 что стоит выделить или доучить\n\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
-        return
-    if cmd in ("/оба", "/both", "both", "оба", "всё"):
-        if not s.get("resume_text"):
-            send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /оба.")
-            return
-        with _session_lock:
-            if s.get("state") == "processing":
-                send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
-                return
-            s["state"] = "waiting_both"
-        _touch(user_id)
-        fname = s.get("resume_filename", "резюме")
-        send(user_id, f"🚀 Режим: резюме + письмо\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я сразу подготовлю\nадаптированное резюме и сопроводительное письмо.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
-        return
-    if cmd in ("/письмо", "/coverletter", "coverletter", "письмо", "сопроводительное"):
-        if not s.get("resume_text"):
-            send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /письмо.")
-            return
-        with _session_lock:
-            if s.get("state") == "processing":
-                send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
-                return
-            s["state"] = "waiting_coverletter"
-        _touch(user_id)
-        fname = s.get("resume_filename", "резюме")
-        send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
-        return
-    if cmd in ("/здоровье", "/health"):
-        send(user_id, f"✅ Бот работает! Версия 6.5\nАктивных сессий: {len(_sessions)}")
-        return
-    if cmd in ("/статус", "/status", "статус"):
-        with _session_lock:
-            state = s.get("state", "waiting_resume")
-            resume_file = s.get("resume_filename")
-            resume_len = len(s.get("resume_text") or "")
-            last_url = s.get("last_vacancy_url")
-            forced_lang = s.get("forced_lang")
-        state_labels = {
-            "waiting_resume": "⏳ Ожидание резюме",
-            "waiting_vacancy": "🔗 Ожидание ссылки на вакансию",
-            "waiting_score": "📊 Режим анализа соответствия",
-            "waiting_both": "🚀 Режим: резюме + письмо",
-            "waiting_coverletter": "✉️ Режим сопроводительного письма",
-            "processing": "⚙️ Обрабатываю запрос…",
-        }
-        state_label = state_labels.get(state, state)
-        lang_label = {"en": "английский", "ru": "русский", None: "авто"}
-        lines = ["📋 Состояние сессии:\n"]
-        if resume_file:
-            lines.append(f"📄 Резюме: {resume_file} ({resume_len} символов)")
-        else:
-            lines.append("📄 Резюме: не загружено")
-        lines.append(f"🔄 Режим: {state_label}")
-        lines.append(f"🌐 Язык (принудительно): {lang_label[forced_lang]}")
-        if last_url:
-            lines.append(f"🔗 Последняя вакансия: {last_url}")
-        if state == "waiting_resume":
-            lines.append("\nОтправь файл резюме (PDF или DOCX) чтобы начать.")
-        elif state == "waiting_vacancy":
-            lines.append("\nПришли ссылку с hh.ru — или выбери режим (/анализ, /письмо, /оба).")
-        send(user_id, "\n".join(lines))
-        return
-    if cmd in ("/скачать", "/download", "скачать"):
-        with _session_lock:
-            has_resume = bool(s.get("last_resume_pdf"))
-            has_letter = bool(s.get("last_letter_pdf"))
-        if not has_resume and not has_letter:
-            send(user_id, "📭 Нет сохранённых файлов для повторной отправки.\n\nПришли ссылку на вакансию с hh.ru — и я сгенерирую документы.\nДля резюме + письма сразу используй /оба")
-            return
-        with _session_lock:
-            if s.get("state") == "processing":
-                send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
-                return
-        send(user_id, "📤 Повторно отправляю файлы...")
-        if has_resume:
-            with _session_lock:
-                r = s["last_resume_pdf"]
-            _send_pdf_or_text(user_id, r["text"], title=r["title"], fallback_header="📄 Адаптированное резюме:\n\n")
-        if has_letter:
-            with _session_lock:
-                l = s["last_letter_pdf"]
-            _send_pdf_or_text(user_id, l["text"], title=l["title"], fallback_header="✉️ Сопроводительное письмо:\n\n")
-        parts = []
-        if has_resume:
-            parts.append("резюме")
-        if has_letter:
-            parts.append("письмо")
-        send(user_id, f"✅ Готово! Отправил: {' и '.join(parts)}.")
-        return
-
-    # ── 4. Fallthrough ────────────────────────────────────────────────────────
+    # ── 4. Fallthrough (unrecognized text) ───────────────────────────────────
     with _session_lock:
         state = s.get("state", "waiting_resume")
     if state == "waiting_score":
@@ -861,7 +912,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.5",
+        "version": "6.6",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -882,7 +933,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.5...")
+    logger.info("🚀 Starting ResumePro AI bot v6.6...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
