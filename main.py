@@ -1,7 +1,8 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.3
-Fixed: session lock, forced English for LinkedIn, debug logging.
+ResumePro AI — VK Bot v6.4
+- Session lock, forced language commands, improved language detection.
+- LinkedIn forced English, instant webhook response.
 """
 
 import sys as _sys, os as _os
@@ -62,7 +63,6 @@ _MSG_TTL = 60
 _MSG_CACHE_MAX = 2000
 
 def _is_duplicate_message(message_id: int) -> bool:
-    """Return True if this VK message_id was already processed. Thread-safe."""
     if not message_id:
         return False
     now = time.time()
@@ -78,33 +78,30 @@ def _is_duplicate_message(message_id: int) -> bool:
 
 # ── User session store (thread‑safe) ─────────────────────────────────────────
 _sessions: dict = {}
-_session_lock = threading.Lock()          # ← added lock for session access
+_session_lock = threading.Lock()
 _SESSION_TTL = 3600
 
 def _get_session(user_id: int) -> dict:
-    """Return session dict for user_id, thread‑safe."""
     with _session_lock:
         now = time.time()
         s = _sessions.get(user_id)
         if s and now - s.get("updated_at", 0) < _SESSION_TTL:
             return s
-        # New or expired session
         _sessions[user_id] = {
             "resume_text": None,
             "resume_filename": None,
             "state": "waiting_resume",
+            "forced_lang": None,       # None = auto, "en" or "ru"
             "updated_at": now,
         }
         return _sessions[user_id]
 
 def _touch(user_id: int) -> None:
-    """Update session timestamp, thread‑safe."""
     with _session_lock:
         if user_id in _sessions:
             _sessions[user_id]["updated_at"] = time.time()
 
 def _clear_session(user_id: int) -> None:
-    """Remove session, thread‑safe."""
     with _session_lock:
         _sessions.pop(user_id, None)
 
@@ -136,7 +133,10 @@ GREETING = (
     "• /оба      — резюме + письмо одновременно\n"
     "• /статус   — показать текущее состояние сессии\n"
     "• /скачать  — повторно получить последние PDF-файлы\n"
-    "• /сброс    — начать заново\n\n"
+    "• /сброс    — начать заново\n"
+    "• /язык английский — все выходные документы на английском\n"
+    "• /язык русский    — все выходные документы на русском\n"
+    "• /язык авто       — автоматическое определение языка вакансии\n\n"
     "Проект Школы 21 • Готов помочь! 🚀"
 )
 
@@ -165,7 +165,11 @@ HELP = (
     "1. Загрузи резюме\n"
     "2. Отправь /оба\n"
     "3. Пришли ссылку — получишь оба документа\n\n"
-    "⚠️ Поддерживаются только вакансии с hh.ru\n\n"
+    "Управление языком:\n"
+    "• /язык английский — принудительно английский\n"
+    "• /язык русский    — принудительно русский\n"
+    "• /язык авто       — автоматическое определение (по умолчанию)\n\n"
+    "⚠️ Поддерживаются вакансии с hh.ru, SuperJob, Rabota.ru, LinkedIn, Habr, а также вставленный текст.\n\n"
     "Команды:\n"
     "• /статус   — показать текущее состояние сессии\n"
     "• /сброс    — начать заново\n"
@@ -346,30 +350,54 @@ def build_score_report(resume_text: str, vacancy_text: str) -> str:
     return "\n".join(lines)
 
 def detect_language(text: str, url_hint: str = "") -> str:
-    """Определяет язык вакансии; для LinkedIn принудительно English."""
+    """
+    Улучшенное определение языка вакансии.
+    Возвращает 'en' или 'ru'.
+    """
+    # 1. Подсказка по URL
     if "linkedin.com" in url_hint.lower():
         return "en"
     if not text:
         return "ru"
-    english_markers = ["the", "and", "for", "with", "you", "are", "not", "this", "that"]
-    lower = text.lower()
-    for marker in english_markers:
-        if f" {marker} " in lower or lower.startswith(marker + " "):
-            result = "en"
-            logger.debug(f"detect_language: marker '{marker}' found, returning en")
-            return result
+    # 2. Анализ символов
     cyrillic = sum(1 for ch in text if 'а' <= ch.lower() <= 'я')
     latin = sum(1 for ch in text if 'a' <= ch.lower() <= 'z')
-    result = "en" if latin > cyrillic else "ru"
-    logger.debug(f"detect_language: url_hint={url_hint}, cyrillic={cyrillic}, latin={latin}, result={result}")
-    return result
+    # 3. Поиск частотных английских слов
+    english_words = {"the", "and", "for", "with", "you", "are", "not", "this", "that", "will", "from", "have", "your", "please", "experience", "skills", "requirements"}
+    text_lower = text.lower()
+    english_score = sum(1 for word in english_words if f" {word} " in text_lower or text_lower.startswith(word + " "))
+    # 4. Решение
+    if english_score >= 2:
+        return "en"
+    if latin > cyrillic * 1.5:   # латиницы значительно больше
+        return "en"
+    if cyrillic > latin * 1.5:   # кириллицы значительно больше
+        return "ru"
+    # По умолчанию русский
+    return "ru"
 
 # ── Core conversation handler ─────────────────────────────────────────────────
 
 def handle(user_id: int, text: str, attachments: list) -> None:
-    # Get session with lock (inside _get_session)
     s = _get_session(user_id)
     cmd = text.lower().strip()
+
+    # ── 0. Language override commands ────────────────────────────────────────
+    if cmd in ("/язык английский", "/lang en", "/lang english"):
+        with _session_lock:
+            s["forced_lang"] = "en"
+        send(user_id, "🌐 Язык установлен на английский. Все выходные документы будут на английском.")
+        return
+    if cmd in ("/язык русский", "/lang ru", "/lang russian"):
+        with _session_lock:
+            s["forced_lang"] = "ru"
+        send(user_id, "🌐 Язык установлен на русский. Все выходные документы будут на русском.")
+        return
+    if cmd in ("/язык авто", "/lang auto", "/lang default"):
+        with _session_lock:
+            s["forced_lang"] = None
+        send(user_id, "🌐 Автоматическое определение языка вакансии (по умолчанию).")
+        return
 
     # ── 1. File attachment ───────────────────────────────────────────────────
     doc = next((a for a in attachments if a.get("type") == "doc"), None)
@@ -442,13 +470,11 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             _touch(user_id)
             send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX).\n\n💾 Запомнил описание/ссылку вакансии — пришли резюме и сразу начну!")
             return
-        # Check state with lock to avoid race
         with _session_lock:
             current_state = s.get("state")
             if current_state == "processing":
                 send(user_id, "⏳ Уже обрабатываю предыдущий запрос, подожди немного.")
                 return
-            # Atomically set state to processing
             s["state"] = "processing"
             s["last_vacancy_url"] = vacancy_input
         _touch(user_id)
@@ -505,11 +531,17 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             s["state"] = "waiting_vacancy"
                     return
 
-                vacancy_lang = detect_language(vacancy_text, vacancy_label)
-                # Force English for LinkedIn
-                if "linkedin.com" in vacancy_label:
-                    vacancy_lang = "en"
-                    logger.info(f"🔧 LinkedIn detected – forcing language: en")
+                # Определение языка с учётом принудительного
+                forced = s.get("forced_lang")
+                if forced:
+                    vacancy_lang = forced
+                    logger.info(f"Using forced language: {vacancy_lang}")
+                else:
+                    vacancy_lang = detect_language(vacancy_text, vacancy_label)
+                    # Принудительный английский для LinkedIn (даже если forced = None)
+                    if "linkedin.com" in vacancy_label:
+                        vacancy_lang = "en"
+                        logger.info(f"🔧 LinkedIn detected – forcing language: en")
                 with _session_lock:
                     s["vacancy_lang"] = vacancy_lang
                 logger.info(f"Определён язык вакансии: {vacancy_lang}")
@@ -654,7 +686,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_process, daemon=True).start()
         return
 
-    # ── 3. Commands ───────────────────────────────────────────────────────────
+    # ── 3. Other commands ─────────────────────────────────────────────────────
     if cmd in ("/старт", "/start", "start", "начать", "привет", "hi", "hello", ""):
         _clear_session(user_id)
         send(user_id, GREETING)
@@ -709,7 +741,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
         return
     if cmd in ("/здоровье", "/health"):
-        send(user_id, f"✅ Бот работает! Версия 6.3\nАктивных сессий: {len(_sessions)}")
+        send(user_id, f"✅ Бот работает! Версия 6.4\nАктивных сессий: {len(_sessions)}")
         return
     if cmd in ("/статус", "/status", "статус"):
         with _session_lock:
@@ -717,6 +749,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             resume_file = s.get("resume_filename")
             resume_len = len(s.get("resume_text") or "")
             last_url = s.get("last_vacancy_url")
+            forced_lang = s.get("forced_lang")
         state_labels = {
             "waiting_resume": "⏳ Ожидание резюме",
             "waiting_vacancy": "🔗 Ожидание ссылки на вакансию",
@@ -726,12 +759,14 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             "processing": "⚙️ Обрабатываю запрос…",
         }
         state_label = state_labels.get(state, state)
+        lang_label = {"en": "английский", "ru": "русский", None: "авто"}
         lines = ["📋 Состояние сессии:\n"]
         if resume_file:
             lines.append(f"📄 Резюме: {resume_file} ({resume_len} символов)")
         else:
             lines.append("📄 Резюме: не загружено")
         lines.append(f"🔄 Режим: {state_label}")
+        lines.append(f"🌐 Язык: {lang_label[forced_lang]}")
         if last_url:
             lines.append(f"🔗 Последняя вакансия: {last_url}")
         if state == "waiting_resume":
@@ -787,7 +822,6 @@ def handle(user_id: int, text: str, attachments: list) -> None:
 
 # ── Background dispatcher for webhook ─────────────────────────────────────────
 def _safe_handle(user_id: int, text: str, attachments: list) -> None:
-    """Dispatch handle() from a background thread so the webhook returns instantly."""
     try:
         handle(user_id, text, attachments)
     except Exception as e:
@@ -815,7 +849,6 @@ def webhook():
         return jsonify({"status": "ok"})
     logger.info("📨 user=%s msg_id=%s text='%.60s' attachments=%d",
                 user_id, message_id, text, len(attachments))
-    # Dispatch to background thread and return immediately.
     threading.Thread(
         target=_safe_handle,
         args=(user_id, text, attachments),
@@ -827,7 +860,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.3",
+        "version": "6.4",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -848,7 +881,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.3...")
+    logger.info("🚀 Starting ResumePro AI bot v6.4...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
