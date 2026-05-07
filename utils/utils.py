@@ -13,13 +13,13 @@ from bs4 import BeautifulSoup
 from pypdf import PdfReader
 from docx import Document
 
-# Пытаемся импортировать cloudscraper для обхода Cloudflare (Rabota.ru)
+# Try to import cloudscraper for Rabota.ru (Cloudflare bypass)
 try:
     import cloudscraper
     CLOUDSCRAPER_AVAILABLE = True
 except ImportError:
     CLOUDSCRAPER_AVAILABLE = False
-    logging.getLogger(__name__).warning("cloudscraper not installed, Rabota.ru parsing may fail on Cloudflare")
+    logging.getLogger(__name__).warning("cloudscraper not installed – Rabota.ru may fail")
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ def _hh_fetch_api(vacancy_id: str, retries: int = 3) -> str:
             logger.warning("HH API attempt %d error: %s", attempt + 1, e)
     return "Error: не удалось получить вакансию через API после нескольких попыток."
 
-# ── SuperJob parser (non‑blocking, with timeout) ─────────────────────────────
+# ── SuperJob parser (non‑blocking, timeout, robust) ─────────────────────────
 
 def parse_superjob_vacancy(url: str) -> str:
     try:
@@ -217,9 +217,11 @@ def parse_superjob_vacancy(url: str) -> str:
         if not match:
             return "Error: Invalid SuperJob URL — expected superjob.ru/vakansii/{slug}-{id}.html"
         vacancy_id = match.group(1)
-        time.sleep(random.uniform(0.3, 0.9))
+        time.sleep(random.uniform(0.5, 1.0))
+
         session = requests.Session()
         session.headers.update(_BROWSER_HEADERS)
+        # CRITICAL: timeout to avoid hanging
         try:
             resp = session.get(url, timeout=20, allow_redirects=True)
             resp.raise_for_status()
@@ -229,12 +231,16 @@ def parse_superjob_vacancy(url: str) -> str:
             return f"Error: HTTP {e.response.status_code} fetching SuperJob vacancy"
         except requests.RequestException as e:
             return f"Error: network error fetching SuperJob vacancy: {e}"
+
         soup = BeautifulSoup(resp.text, "lxml")
-        # window.APP_STATE
+
+        # Strategy 1: window.APP_STATE (with length limit to avoid processing huge scripts)
         for script in soup.find_all("script"):
             txt = script.string or ""
             if "window.APP_STATE=" not in txt:
                 continue
+            # Limit length to avoid regex catastrophes
+            txt = txt[:20000]
             m = re.search(r"window\.APP_STATE=(\{.+\});?\s*$", txt, re.DOTALL)
             if not m:
                 continue
@@ -242,18 +248,22 @@ def parse_superjob_vacancy(url: str) -> str:
                 state = json.loads(m.group(1))
             except json.JSONDecodeError:
                 break
+
             ents = state.get("entities", {})
             vmi  = ents.get("vacancyMainInfo",   {}).get(vacancy_id, {}).get("attributes", {})
             vdi  = ents.get("vacancyDetailInfo",  {}).get(vacancy_id, {}).get("attributes", {})
             vsal = ents.get("vacancySalary",      {}).get(vacancy_id, {}).get("attributes", {})
             vci  = ents.get("vacancyCompanyInfo", {}).get(vacancy_id, {}).get("attributes", {})
+
             title = vmi.get("profession", "")
             if not title:
                 break
+
             company = vci.get("name", "")
             min_sal = vsal.get("minSalary") or vmi.get("minSalary")
             max_sal = vsal.get("maxSalary") or vmi.get("maxSalary")
             salary  = _format_salary_range(min_sal, max_sal, currency="руб.")
+
             full_text = vdi.get("fullTextPlain") or vdi.get("fullText", "")
             if full_text:
                 raw = BeautifulSoup(full_text, "html.parser").get_text(" ", strip=True)
@@ -263,52 +273,56 @@ def parse_superjob_vacancy(url: str) -> str:
                 combined = "\n".join(p for p in parts if p)
                 raw = BeautifulSoup(combined, "html.parser").get_text(" ", strip=True)
                 description = _clean_vacancy_text(raw)
+
             logger.info("✅ SuperJob parsed via APP_STATE: id=%s", vacancy_id)
             return _format_vacancy(title=title, company=company, salary=salary, description=description)
-        # fallback og:tags
+
+        # Strategy 2: og: tags (fast fallback)
         og_title = soup.find("meta", property="og:title")
         og_desc  = soup.find("meta", property="og:description")
         h1       = soup.find("h1")
+
         title = h1.get_text(strip=True) if h1 else (
             og_title.get("content", "").split(" в компании")[0].strip() if og_title else ""
         )
         description = og_desc.get("content", "") if og_desc else ""
+
         if not title:
             return "Error: не удалось распознать вакансию SuperJob (нет заголовка)"
+
         logger.info("✅ SuperJob parsed via og-tags: id=%s", vacancy_id)
         return _format_vacancy(title=title, description=description)
+
+    except requests.Timeout:
+        return "Error: Таймаут при загрузке SuperJob (сайт не отвечает)"
     except Exception as e:
         logger.error("SuperJob parse error: %s", e, exc_info=True)
         return f"Error: {e}"
 
-# ── Rabota.ru parser (with cloudscraper fallback) ───────────────────────────
+# ── Rabota.ru parser (cloudscraper + full headers) ─────────────────────────
 
 def parse_rabota_vacancy(url: str) -> str:
-    """
-    Парсинг вакансии с rabota.ru с обходом Cloudflare (если установлен cloudscraper).
-    """
     try:
         if "rabota.ru" not in url.lower():
             return "Error: URL does not appear to be a rabota.ru vacancy"
 
-        time.sleep(random.uniform(0.5, 1.5))
+        time.sleep(random.uniform(0.8, 1.8))
 
-        # Используем cloudscraper если доступен, иначе обычный requests
         if CLOUDSCRAPER_AVAILABLE:
             scraper = cloudscraper.create_scraper()
             scraper.headers.update(_BROWSER_HEADERS)
-            resp = scraper.get(url, timeout=20, allow_redirects=True)
+            resp = scraper.get(url, timeout=25, allow_redirects=True)
         else:
             session = requests.Session()
             session.headers.update(_BROWSER_HEADERS)
-            resp = session.get(url, timeout=20, allow_redirects=True)
+            resp = session.get(url, timeout=25, allow_redirects=True)
 
         if resp.status_code != 200:
             return f"Error: HTTP {resp.status_code} при загрузке Rabota.ru"
 
         soup = BeautifulSoup(resp.text, "lxml")
 
-        # 1. JSON‑LD
+        # 1. JSON‑LD (most reliable)
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
@@ -320,7 +334,7 @@ def parse_rabota_vacancy(url: str) -> str:
             org = data.get("hiringOrganization", {})
             company = org.get("name", "").strip() if isinstance(org, dict) else ""
             description = BeautifulSoup(data.get("description", ""), "html.parser").get_text(" ", strip=True)
-            # извлекаем зарплату
+            # Extract salary
             salary = ""
             sal = data.get("baseSalary", {})
             if sal:
@@ -335,7 +349,7 @@ def parse_rabota_vacancy(url: str) -> str:
                     salary = f"до {max_sal} руб."
             return _format_vacancy(title=title, company=company, salary=salary, description=description)
 
-        # 2. Микроразметка itemprop
+        # 2. itemprop microdata
         title_el = soup.find(attrs={"itemprop": "title"}) or soup.find(attrs={"itemprop": "name"}) or soup.find("h1")
         desc_el = soup.find(attrs={"itemprop": "description"})
         if title_el and desc_el:
@@ -345,7 +359,7 @@ def parse_rabota_vacancy(url: str) -> str:
 
         # 3. Open Graph
         og_title = soup.find("meta", property="og:title")
-        og_desc = soup.find("meta", property="og:description")
+        og_desc  = soup.find("meta", property="og:description")
         if og_title:
             title = og_title.get("content", "").strip()
             description = og_desc.get("content", "").strip() if og_desc else ""
@@ -353,16 +367,15 @@ def parse_rabota_vacancy(url: str) -> str:
 
         return "Error: не удалось распознать вакансию Rabota.ru"
 
+    except requests.Timeout:
+        return "Error: Таймаут при загрузке Rabota.ru"
     except Exception as e:
         logger.error("Rabota.ru parse error: %s", e, exc_info=True)
         return f"Error: {e}"
 
-# ── Habr Jobs parser (new) ──────────────────────────────────────────────────
+# ── Habr Jobs parser ─────────────────────────────────────────────────────────
 
 def parse_habr_vacancy(url: str) -> str:
-    """
-    Парсинг вакансии с habr.com (https://habr.com/ru/companies/*/vacancies/*)
-    """
     try:
         if "habr.com" not in url.lower() or "/vacancies/" not in url.lower():
             return "Error: URL does not appear to be a Habr vacancy"
@@ -377,19 +390,15 @@ def parse_habr_vacancy(url: str) -> str:
 
         soup = BeautifulSoup(resp.text, "lxml")
 
-        # Заголовок – обычно h1
         title_el = soup.find("h1")
         title = title_el.get_text(strip=True) if title_el else ""
 
-        # Компания – в ссылке с текстом компании или в span
         company_el = soup.find("a", class_=re.compile(r"company", re.I)) or soup.find("span", class_=re.compile(r"company", re.I))
         company = company_el.get_text(strip=True) if company_el else ""
 
-        # Описание – ищем div с классом "job-description", "vacancy-description", "content" или просто article
         desc_el = soup.find("div", class_=re.compile(r"job-description|vacancy-description|content", re.I)) or soup.find("article")
         description = desc_el.get_text(" ", strip=True) if desc_el else ""
 
-        # Очистка от лишних пробелов
         description = re.sub(r'\s+', ' ', description).strip()
 
         if not title and not description:
