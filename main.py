@@ -1,13 +1,12 @@
-# main.py (full corrected version with import os)
+# main.py (v6.13 – file detection moved before commands)
 """
-ResumePro AI — VK Bot v6.12
-- Fixed missing 'os' import
-- Robust file attachment detection
-- Debug logging
+ResumePro AI — VK Bot v6.13
+- File attachment detection now runs before any command.
+- Guaranteed return after file processing.
 """
 
 import sys as _sys
-import os   # <-- FIX: added this line
+import os
 import re
 import time
 import random
@@ -456,7 +455,7 @@ def _cmd_letter_mode(user_id: int):
     send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
 
 def _cmd_health(user_id: int):
-    send(user_id, f"✅ Бот работает! Версия 6.12\nАктивных сессий: {len(_sessions)}")
+    send(user_id, f"✅ Бот работает! Версия 6.13\nАктивных сессий: {len(_sessions)}")
 
 def _cmd_download(user_id: int):
     s = _get_session(user_id)
@@ -483,10 +482,53 @@ def _cmd_download(user_id: int):
 
 def handle(user_id: int, text: str, attachments: list) -> None:
     s = _get_session(user_id)
-    cmd = text.lower().strip()
 
-    # Debug logging to see what attachments VK sends
-    logger.info(f"🔍 DEBUG attachments for user {user_id}: {attachments}")
+    # 🔥 FILE ATTACHMENT HANDLING – MUST BE FIRST 🔥
+    doc = None
+    for a in attachments:
+        if a.get("type") == "doc":
+            doc = a
+            break
+        if "doc" in a:
+            doc = a
+            logger.info(f"Found doc in attachment with type {a.get('type')}")
+            break
+
+    if doc:
+        doc_info = doc.get("doc", doc)
+        ext = doc_info.get("ext", "").lower()
+        fname = doc_info.get("title", doc_info.get("filename", "файл"))
+        if ext not in ("pdf", "docx", "doc"):
+            send(user_id, "❌ Неподдерживаемый формат.\nОтправь резюме в формате PDF или DOCX.")
+            return
+        send(user_id, f"⏳ Читаю файл {fname}...")
+        url = doc_info.get("url")
+        if not url:
+            send(user_id, "❌ Не удалось получить URL файла.")
+            return
+        path = download_file(url, ext)
+        if not path:
+            send(user_id, "❌ Не удалось загрузить файл. Попробуй ещё раз.")
+            return
+        resume_text = extract_text_from_file(path, ext)
+        try:
+            os.unlink(path)
+        except:
+            pass
+        if not resume_text or len(resume_text) < 50:
+            send(user_id, "❌ Не удалось извлечь текст.\nУбедись, что PDF не отсканирован, или используй DOCX.")
+            return
+        with _session_lock:
+            s["resume_text"] = resume_text
+            s["resume_filename"] = fname
+            s["state"] = "waiting_vacancy"
+        _touch(user_id)
+        logger.info("📄 Resume loaded: %s (%d chars)", fname, len(resume_text))
+        send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
+        return   # CRITICAL – stop further processing
+
+    # ── Now handle commands ─────────────────────────────────────────────────
+    cmd = text.lower().strip()
 
     # Language commands
     if cmd in ("/язык английский", "/lang en", "/lang english"):
@@ -544,52 +586,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_cmd_download, args=(user_id,), daemon=True).start()
         return
 
-    # ── File attachment – robust detection ──────────────────────────────────
-    doc = None
-    for a in attachments:
-        if a.get("type") == "doc":
-            doc = a
-            break
-        if "doc" in a:
-            doc = a
-            logger.info(f"Found doc in attachment with type {a.get('type')}")
-            break
-
-    if doc:
-        # Extract document info (could be directly "doc" or nested)
-        doc_info = doc.get("doc", doc)
-        ext = doc_info.get("ext", "").lower()
-        fname = doc_info.get("title", doc_info.get("filename", "файл"))
-        if ext not in ("pdf", "docx", "doc"):
-            send(user_id, "❌ Неподдерживаемый формат.\nОтправь резюме в формате PDF или DOCX.")
-            return
-        send(user_id, f"⏳ Читаю файл {fname}...")
-        url = doc_info.get("url")
-        if not url:
-            send(user_id, "❌ Не удалось получить URL файла.")
-            return
-        path = download_file(url, ext)
-        if not path:
-            send(user_id, "❌ Не удалось загрузить файл. Попробуй ещё раз.")
-            return
-        resume_text = extract_text_from_file(path, ext)
-        try:
-            os.unlink(path)
-        except:
-            pass
-        if not resume_text or len(resume_text) < 50:
-            send(user_id, "❌ Не удалось извлечь текст.\nУбедись, что PDF не отсканирован, или используй DOCX.")
-            return
-        with _session_lock:
-            s["resume_text"] = resume_text
-            s["resume_filename"] = fname
-            s["state"] = "waiting_vacancy"
-        _touch(user_id)
-        logger.info("📄 Resume loaded: %s (%d chars)", fname, len(resume_text))
-        send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
-        return   # CRITICAL – stop further processing
-
-    # ── Vacancy input (unchanged from v6.7) ─────────────────────────────────
+    # ── Vacancy input (only if no attachment and no command matched) ─────────
     hh_url = extract_hh_url(text)
     other_url = ""
     pasted_vacancy = ""
@@ -828,7 +825,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_process, daemon=True).start()
         return
 
-    # ── Fallthrough ──────────────────────────────────────────────────────────
+    # ── Fallthrough (unrecognized text, no file, no vacancy) ─────────────────
     state = s.get("state", "waiting_resume")
     if state == "waiting_score":
         send(user_id, "📊 Жду ссылку на вакансию для анализа соответствия\nПример: https://hh.ru/vacancy/12345678\n\nИли /сброс чтобы выйти из режима анализа.")
@@ -876,7 +873,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.12",
+        "version": "6.13",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -897,7 +894,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.12...")
+    logger.info("🚀 Starting ResumePro AI bot v6.13...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
