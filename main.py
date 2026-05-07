@@ -1,8 +1,10 @@
 # main.py
 """
-ResumePro AI — VK Bot v6.7 (fixed missing returns)
-- Added returns after file upload to prevent session reset.
-- Includes language override commands, instant ack, thread-safe sessions.
+ResumePro AI — VK Bot v6.11
+- Robust file attachment detection (works with any VK attachment structure)
+- Debug logging for attachments
+- Guaranteed return after file upload
+- All commands, language override, session lock
 """
 
 import sys as _sys, os as _os
@@ -10,7 +12,6 @@ _PKGS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".pkgs")
 if _os.path.isdir(_PKGS) and _PKGS not in _sys.path:
     _sys.path.insert(0, _PKGS)
 
-import os
 import re
 import time
 import random
@@ -56,8 +57,7 @@ gigachat = GigaChat(credentials=Config.GIGACHAT_API_KEY, verify_ssl_certs=False)
 generator = AntiHallucinationGenerator(gigachat, max_retries=Config.MAX_RETRIES)
 logger.info("✅ Bot ready. Group: %s", Config.VK_GROUP_ID)
 
-# ── Thread‑safe deduplication ────────────────────────────────────────────────
-_seen_msg_ids: OrderedDict = OrderedDict()
+_seen_msg_ids = OrderedDict()
 _seen_lock = threading.Lock()
 _MSG_TTL = 60
 _MSG_CACHE_MAX = 2000
@@ -76,8 +76,7 @@ def _is_duplicate_message(message_id: int) -> bool:
             _seen_msg_ids.popitem(last=False)
     return False
 
-# ── User session store (thread‑safe) ─────────────────────────────────────────
-_sessions: dict = {}
+_sessions = {}
 _session_lock = threading.Lock()
 _SESSION_TTL = 3600
 
@@ -105,19 +104,18 @@ def _clear_session(user_id: int) -> None:
     with _session_lock:
         _sessions.pop(user_id, None)
 
-def _session_cleanup() -> None:
+def _session_cleanup():
     while True:
         time.sleep(600)
         now = time.time()
         with _session_lock:
-            expired = [uid for uid, s in list(_sessions.items())
+            expired = [uid for uid, s in _sessions.items()
                        if now - s.get("updated_at", 0) > _SESSION_TTL]
             for uid in expired:
                 _sessions.pop(uid, None)
         if expired:
             logger.debug("🧹 Cleaned %d expired sessions", len(expired))
 
-# ── Static messages ───────────────────────────────────────────────────────────
 GREETING = (
     "👋 Привет! Я бот Резюме.Про 🎯\n"
     "Я помогу адаптировать твоё резюме под вакансию за 30 секунд с помощью ИИ.\n\n"
@@ -127,7 +125,7 @@ GREETING = (
     "3. Получи адаптированную версию + Match Score\n\n"
     "💡 Команды:\n"
     "• /помощь   — справка\n"
-    "• /пример   — показать пример\n"
+       "• /пример   — показать пример\n"
     "• /анализ   — детальный анализ соответствия вакансии\n"
     "• /письмо   — написать сопроводительное письмо\n"
     "• /оба      — резюме + письмо одновременно\n"
@@ -191,8 +189,6 @@ DEMO = (
     "📊 Match Score: 91%"
 )
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 def send(user_id: int, text: str) -> bool:
     try:
         if len(text) > 4096:
@@ -209,12 +205,12 @@ def send(user_id: int, text: str) -> bool:
         return True
     except VkApiError as e:
         if e.code == 901:
-            logger.warning("⚠️ User %s blocked messages (VK 901)", user_id)
+            logger.warning("⚠️ User %s blocked messages", user_id)
         else:
             logger.error("❌ VK API error → user %s | code=%s | %s", user_id, e.code, e)
         return False
     except Exception as e:
-        logger.exception("❌ send() unexpected error → user %s: %s", user_id, e)
+        logger.exception("❌ send() error → user %s: %s", user_id, e)
         return False
 
 def send_document(user_id: int, file_path: str, title: str) -> bool:
@@ -231,11 +227,11 @@ def send_document(user_id: int, file_path: str, title: str) -> bool:
         resp.raise_for_status()
         file_key = resp.json().get("file", "")
         if not file_key:
-            raise ValueError(f"VK upload returned no file key: {resp.text}")
+            raise ValueError(f"No file key: {resp.text}")
         saved = vk.docs.save(file=file_key, title=title)
         doc = saved.get("doc") or (saved[0] if isinstance(saved, list) else None)
         if not doc:
-            raise ValueError(f"VK docs.save returned unexpected format: {saved}")
+            raise ValueError(f"Invalid save response: {saved}")
         attachment = f"doc{doc['owner_id']}_{doc['id']}"
         vk_session.method(
             "messages.send",
@@ -246,28 +242,25 @@ def send_document(user_id: int, file_path: str, title: str) -> bool:
                 "random_id": random.randint(1, 2_147_483_647),
             },
         )
-        logger.info("✅ Document sent to user %s: '%s'", user_id, title)
+        logger.info("✅ Document sent: '%s'", title)
         return True
     except Exception as e:
-        logger.exception("❌ send_document() error → user %s: %s", user_id, e)
+        logger.exception("❌ send_document error: %s", e)
         return False
 
 def _send_pdf_or_text(user_id: int, text: str, title: str, fallback_header: str) -> None:
     pdf_path = None
     try:
         pdf_path = text_to_pdf(text, title)
-        ok = send_document(user_id, pdf_path, title)
-        if not ok:
-            raise RuntimeError("send_document returned False")
+        if send_document(user_id, pdf_path, title):
+            return
+        raise RuntimeError("send_document returned False")
     except Exception as e:
-        logger.warning("⚠️ PDF send failed (%s), falling back to text", e)
+        logger.warning("PDF send failed (%s), falling back to text", e)
         send(user_id, fallback_header + text)
     finally:
-        if pdf_path:
-            try:
-                os.unlink(pdf_path)
-            except OSError:
-                pass
+        if pdf_path and os.path.exists(pdf_path):
+            os.unlink(pdf_path)
 
 def download_file(url: str, ext: str) -> str:
     try:
@@ -277,16 +270,15 @@ def download_file(url: str, ext: str) -> str:
             f.write(resp.content)
             return f.name
     except Exception as e:
-        logger.error("❌ File download error: %s", e)
+        logger.error("❌ Download error: %s", e)
         return ""
 
 def extract_hh_url(text: str) -> str:
     m = re.search(r"https?://[^\s]*hh\.ru/vacancy/\d+[^\s]*", text)
     if m:
         return m.group(0).rstrip(".,;!?)")
-    if m := re.search(r"hh\.ru/vacancy/\d+", text):
-        return "https://" + m.group(0)
-    return ""
+    m = re.search(r"hh\.ru/vacancy/\d+", text)
+    return ("https://" + m.group(0)) if m else ""
 
 def extract_any_url(text: str) -> str:
     for m in re.finditer(r"https?://[^\s]+", text):
@@ -300,11 +292,11 @@ def ats_score(confidence: float) -> int:
 
 def build_score_report(resume_text: str, vacancy_text: str) -> str:
     resume_entities = extract_entities(resume_text)
-    resume_tech: set = resume_entities["skills"] & TECH_SKILLS
-    vacancy_tech: set = _scan_tech_skills(vacancy_text)
+    resume_tech = resume_entities["skills"] & TECH_SKILLS
+    vacancy_tech = _scan_tech_skills(vacancy_text)
     present = sorted(resume_tech & vacancy_tech)
     missing = sorted(vacancy_tech - resume_tech)
-    extra   = sorted(resume_tech - vacancy_tech)
+    extra = sorted(resume_tech - vacancy_tech)
     total = len(vacancy_tech)
     if total == 0:
         score = 100 if resume_tech else 0
@@ -368,20 +360,17 @@ def detect_language(text: str, url_hint: str = "") -> str:
         return "ru"
     return "ru"
 
-# ── Command handlers with instant acknowledgment ─────────────────────────────
-def _cmd_language_set(user_id: int, lang: str) -> None:
+def _cmd_language_set(user_id: int, lang: str):
     s = _get_session(user_id)
     with _session_lock:
         s["forced_lang"] = lang
-    if lang == "en":
-        msg = "🌐 Язык установлен на английский. Все выходные документы будут на английском."
-    elif lang == "ru":
-        msg = "🌐 Язык установлен на русский. Все выходные документы будут на русском."
-    else:
-        msg = "🌐 Автоматическое определение языка вакансии (по умолчанию)."
-    send(user_id, msg)
+    msg = {
+        "en": "🌐 Язык установлен на английский. Все выходные документы будут на английском.",
+        "ru": "🌐 Язык установлен на русский. Все выходные документы будут на русском.",
+    }
+    send(user_id, msg.get(lang, "🌐 Автоматическое определение языка вакансии (по умолчанию)."))
 
-def _cmd_status(user_id: int) -> None:
+def _cmd_status(user_id: int):
     s = _get_session(user_id)
     with _session_lock:
         state = s.get("state", "waiting_resume")
@@ -397,14 +386,10 @@ def _cmd_status(user_id: int) -> None:
         "waiting_coverletter": "✉️ Режим сопроводительного письма",
         "processing": "⚙️ Обрабатываю запрос…",
     }
-    state_label = state_labels.get(state, state)
     lang_label = {"en": "английский", "ru": "русский", None: "авто"}
     lines = ["📋 Состояние сессии:\n"]
-    if resume_file:
-        lines.append(f"📄 Резюме: {resume_file} ({resume_len} символов)")
-    else:
-        lines.append("📄 Резюме: не загружено")
-    lines.append(f"🔄 Режим: {state_label}")
+    lines.append(f"📄 Резюме: {resume_file} ({resume_len} символов)" if resume_file else "📄 Резюме: не загружено")
+    lines.append(f"🔄 Режим: {state_labels.get(state, state)}")
     lines.append(f"🌐 Язык (принудительно): {lang_label[forced_lang]}")
     if last_url:
         lines.append(f"🔗 Последняя вакансия: {last_url}")
@@ -414,21 +399,21 @@ def _cmd_status(user_id: int) -> None:
         lines.append("\nПришли ссылку с hh.ru — или выбери режим (/анализ, /письмо, /оба).")
     send(user_id, "\n".join(lines))
 
-def _cmd_reset(user_id: int) -> None:
+def _cmd_reset(user_id: int):
     _clear_session(user_id)
     send(user_id, "🔄 Сессия сброшена.\n\nОтправь новый файл резюме или напиши /старт.")
 
-def _cmd_help(user_id: int) -> None:
+def _cmd_help(user_id: int):
     send(user_id, HELP)
 
-def _cmd_demo(user_id: int) -> None:
+def _cmd_demo(user_id: int):
     send(user_id, DEMO)
 
-def _cmd_start(user_id: int) -> None:
+def _cmd_start(user_id: int):
     _clear_session(user_id)
     send(user_id, GREETING)
 
-def _cmd_score_mode(user_id: int) -> None:
+def _cmd_score_mode(user_id: int):
     s = _get_session(user_id)
     if not s.get("resume_text"):
         send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /анализ.")
@@ -442,7 +427,7 @@ def _cmd_score_mode(user_id: int) -> None:
     fname = s.get("resume_filename", "резюме")
     send(user_id, f"📊 Режим: анализ соответствия\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я покажу:\n  ✅ какие навыки из резюме совпадают с вакансией\n  ❌ чего не хватает\n  💡 что стоит выделить или доучить\n\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
 
-def _cmd_both_mode(user_id: int) -> None:
+def _cmd_both_mode(user_id: int):
     s = _get_session(user_id)
     if not s.get("resume_text"):
         send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /оба.")
@@ -456,7 +441,7 @@ def _cmd_both_mode(user_id: int) -> None:
     fname = s.get("resume_filename", "резюме")
     send(user_id, f"🚀 Режим: резюме + письмо\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я сразу подготовлю\nадаптированное резюме и сопроводительное письмо.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
 
-def _cmd_letter_mode(user_id: int) -> None:
+def _cmd_letter_mode(user_id: int):
     s = _get_session(user_id)
     if not s.get("resume_text"):
         send(user_id, "📎 Сначала отправь файл резюме (PDF или DOCX), а затем введи /письмо.")
@@ -470,10 +455,10 @@ def _cmd_letter_mode(user_id: int) -> None:
     fname = s.get("resume_filename", "резюме")
     send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
 
-def _cmd_health(user_id: int) -> None:
-    send(user_id, f"✅ Бот работает! Версия 6.7\nАктивных сессий: {len(_sessions)}")
+def _cmd_health(user_id: int):
+    send(user_id, f"✅ Бот работает! Версия 6.11\nАктивных сессий: {len(_sessions)}")
 
-def _cmd_download(user_id: int) -> None:
+def _cmd_download(user_id: int):
     s = _get_session(user_id)
     with _session_lock:
         has_resume = bool(s.get("last_resume_pdf"))
@@ -494,20 +479,16 @@ def _cmd_download(user_id: int) -> None:
         with _session_lock:
             l = s["last_letter_pdf"]
         _send_pdf_or_text(user_id, l["text"], title=l["title"], fallback_header="✉️ Сопроводительное письмо:\n\n")
-    parts = []
-    if has_resume:
-        parts.append("резюме")
-    if has_letter:
-        parts.append("письмо")
-    send(user_id, f"✅ Готово! Отправил: {' и '.join(parts)}.")
-
-# ── Core conversation handler ─────────────────────────────────────────────────
+    send(user_id, f"✅ Готово! Отправил: {'резюме' if has_resume else ''}{' и письмо' if has_letter else ''}".strip())
 
 def handle(user_id: int, text: str, attachments: list) -> None:
     s = _get_session(user_id)
     cmd = text.lower().strip()
 
-    # ── 0. Language override commands (instant ack) ──────────────────────────
+    # Debug logging to see what attachments VK sends
+    logger.info(f"🔍 DEBUG attachments for user {user_id}: {attachments}")
+
+    # Language commands
     if cmd in ("/язык английский", "/lang en", "/lang english"):
         send(user_id, "✏️ Принято, устанавливаю английский язык...")
         threading.Thread(target=_cmd_language_set, args=(user_id, "en"), daemon=True).start()
@@ -521,7 +502,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_cmd_language_set, args=(user_id, None), daemon=True).start()
         return
 
-    # ── 1. Other commands with instant ack ───────────────────────────────────
+    # Other commands
     if cmd in ("/статус", "/status", "статус"):
         send(user_id, "✏️ Собираю информацию...")
         threading.Thread(target=_cmd_status, args=(user_id,), daemon=True).start()
@@ -563,24 +544,38 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_cmd_download, args=(user_id,), daemon=True).start()
         return
 
-    # ── 2. File attachment (no instant ack needed) ───────────────────────────
-    doc = next((a for a in attachments if a.get("type") == "doc"), None)
+    # ── File attachment – robust detection ──────────────────────────────────
+    doc = None
+    for a in attachments:
+        if a.get("type") == "doc":
+            doc = a
+            break
+        if "doc" in a:
+            doc = a
+            logger.info(f"Found doc in attachment with type {a.get('type')}")
+            break
+
     if doc:
-        info = doc["doc"]
-        ext = info.get("ext", "").lower()
-        fname = info.get("title", info.get("filename", "файл"))
+        # Extract document info (could be directly "doc" or nested)
+        doc_info = doc.get("doc", doc)
+        ext = doc_info.get("ext", "").lower()
+        fname = doc_info.get("title", doc_info.get("filename", "файл"))
         if ext not in ("pdf", "docx", "doc"):
             send(user_id, "❌ Неподдерживаемый формат.\nОтправь резюме в формате PDF или DOCX.")
             return
         send(user_id, f"⏳ Читаю файл {fname}...")
-        path = download_file(info["url"], ext)
+        url = doc_info.get("url")
+        if not url:
+            send(user_id, "❌ Не удалось получить URL файла.")
+            return
+        path = download_file(url, ext)
         if not path:
             send(user_id, "❌ Не удалось загрузить файл. Попробуй ещё раз.")
             return
         resume_text = extract_text_from_file(path, ext)
         try:
             os.unlink(path)
-        except Exception:
+        except:
             pass
         if not resume_text or len(resume_text) < 50:
             send(user_id, "❌ Не удалось извлечь текст.\nУбедись, что PDF не отсканирован, или используй DOCX.")
@@ -590,23 +585,11 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             s["resume_filename"] = fname
             s["state"] = "waiting_vacancy"
         _touch(user_id)
-        logger.info("📄 Resume loaded for user %s: %s (%d chars)", user_id, fname, len(resume_text))
-        pending_url = s.pop("pending_vacancy_url", None) if "pending_vacancy_url" in s else None
-        pending_text = s.pop("pending_vacancy_text", None) if "pending_vacancy_text" in s else None
-        if pending_url:
-            send(user_id, f"✅ Резюме получено: {fname}\n\n🔗 Вижу ссылку на вакансию, которую ты прислал раньше:\n{pending_url}\n\nНачинаю обработку...")
-            handle(user_id, pending_url, [])
-            return   # <-- CRITICAL: prevent fall-through
-        elif pending_text:
-            preview = pending_text[:120].replace("\n", " ")
-            send(user_id, f"✅ Резюме получено: {fname}\n\n📋 Вижу описание вакансии, которое ты прислал раньше:\n«{preview}…»\n\nНачинаю обработку...")
-            handle(user_id, pending_text, [])
-            return   # <-- CRITICAL: prevent fall-through
-        else:
-            send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
-            return
+        logger.info("📄 Resume loaded: %s (%d chars)", fname, len(resume_text))
+        send(user_id, f"✅ Резюме получено: {fname}\n\nТеперь пришли ссылку на вакансию (hh.ru, любой другой сайт)\nили просто вставь текст вакансии прямо в чат.\n\n💡 После адаптации можно прислать другую вакансию — резюме останется в памяти!")
+        return   # CRITICAL – stop further processing
 
-    # ── 3. Vacancy source detection (long processing) ────────────────────────
+    # ── Vacancy input (unchanged from v6.7) ─────────────────────────────────
     hh_url = extract_hh_url(text)
     other_url = ""
     pasted_vacancy = ""
@@ -615,9 +598,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         if link_att:
             link_url = link_att.get("link", {}).get("url", "")
             hh_url = extract_hh_url(link_url)
-            if hh_url:
-                logger.info("🔗 hh.ru URL from link attachment: %s", hh_url)
-            elif link_url:
+            if not hh_url and link_url:
                 other_url = link_url
                 logger.info("🔗 Non-hh URL from link attachment: %s", other_url)
     if not hh_url and not other_url:
@@ -674,7 +655,6 @@ def handle(user_id: int, text: str, attachments: list) -> None:
             vacancy_label = "(текст вакансии)"
             source_name = "вставленного текста"
 
-        # Send immediate "processing" message
         if score_mode:
             send(user_id, "⏳ Анализирую соответствие резюме вакансии...\nОбычно это занимает несколько секунд.")
         elif coverletter_mode:
@@ -698,22 +678,19 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             s["state"] = "waiting_vacancy"
                     return
 
-                # Language determination with forced override
-                with _session_lock:
-                    forced = s.get("forced_lang")
+                forced = s.get("forced_lang")
                 if forced:
                     vacancy_lang = forced
-                    logger.info(f"🔧 Using forced language from session: {forced} (user {user_id})")
+                    logger.info(f"Using forced language: {forced}")
                 else:
                     vacancy_lang = detect_language(vacancy_text, vacancy_label)
                     if "linkedin.com" in vacancy_label:
                         vacancy_lang = "en"
-                        logger.info(f"🔧 LinkedIn detected – forcing language: en (user {user_id})")
+                        logger.info("LinkedIn detected -> forcing English")
                     else:
-                        logger.info(f"🌐 Auto-detected language: {vacancy_lang} (user {user_id})")
+                        logger.info(f"Auto-detected language: {vacancy_lang}")
                 with _session_lock:
                     s["vacancy_lang"] = vacancy_lang
-                logger.info(f"✅ Final language for generation: {vacancy_lang} (user {user_id})")
 
                 if score_mode:
                     report = build_score_report(s["resume_text"], vacancy_text)
@@ -722,7 +699,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                         s["state"] = "waiting_vacancy"
                     _touch(user_id)
                     send(user_id, "💡 Хочешь адаптировать резюме под эту вакансию?\n• /оба — резюме + письмо сразу\n• просто пришли ту же ссылку — получишь адаптированное резюме\n• /сброс — загрузить другое резюме")
-                    logger.info("✅ Score report done for user %s", user_id)
+                    logger.info("Score report done")
 
                 elif coverletter_mode:
                     letter, metadata = generator.generate_cover_letter(s["resume_text"], vacancy_text, language=vacancy_lang)
@@ -740,7 +717,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                         s["state"] = "waiting_vacancy"
                     _touch(user_id)
                     send(user_id, "💡 Хочешь адаптировать резюме под эту же вакансию?\nПросто пришли ту же ссылку ещё раз.\nДля нового резюме отправь /сброс")
-                    logger.info("✅ Cover letter done for user %s | fallback=%s", user_id, metadata.get("fallback_used"))
+                    logger.info("Cover letter done")
 
                 elif both_mode:
                     try:
@@ -783,9 +760,9 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             s["state"] = "waiting_vacancy"
                         _touch(user_id)
                         send(user_id, "💡 Резюме и письмо готовы! Пришли новую ссылку для другой вакансии.\nДля нового резюме отправь /сброс")
-                        logger.info("✅ Both done for user %s | resume_score=%d | letter_fallback=%s", user_id, score, l_meta.get("fallback_used"))
+                        logger.info("Both done")
                     except Exception as e:
-                        logger.exception("❌ Generation error in both_mode: %s", e)
+                        logger.exception("Error in both_mode: %s", e)
                         send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
                         with _session_lock:
                             s["state"] = "waiting_vacancy"
@@ -796,11 +773,7 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                         adapted, r_meta = generator.generate_safe_resume(s["resume_text"], vacancy_text, language=vacancy_lang)
                         adapted_clean = clean_markdown(adapted)
                         validation_dict = r_meta.get("validation")
-                        if validation_dict is None:
-                            score = 60
-                        else:
-                            conf = validation_dict.get("confidence", 1.0)
-                            score = ats_score(conf)
+                        score = 60 if validation_dict is None else ats_score(validation_dict.get("confidence", 1.0))
                         fname = s.get("resume_filename", "резюме").rsplit(".", 1)[0]
                         if r_meta.get("fallback_used"):
                             r_body = "⚠️ Не удалось адаптировать резюме. Возвращаем оригинал.\n\n" + adapted_clean
@@ -832,15 +805,15 @@ def handle(user_id: int, text: str, attachments: list) -> None:
                             s["state"] = "waiting_vacancy"
                         _touch(user_id)
                         send(user_id, "💡 Резюме и письмо готовы! Пришли новую ссылку для другой вакансии.\nДля нового резюме отправь /сброс")
-                        logger.info("✅ Both (auto) done for user %s | resume_score=%d | letter_fallback=%s", user_id, score, l_meta.get("fallback_used"))
+                        logger.info("Auto both done")
                     except Exception as e:
-                        logger.exception("❌ Generation error in auto mode: %s", e)
+                        logger.exception("Error in auto mode: %s", e)
                         send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
                         with _session_lock:
                             s["state"] = "waiting_vacancy"
 
             except Exception as e:
-                logger.exception("❌ _process() outer error for user %s: %s", user_id, e)
+                logger.exception("_process outer error: %s", e)
                 send(user_id, "❌ Ошибка при генерации. Попробуй ещё раз.")
                 with _session_lock:
                     if score_mode:
@@ -855,9 +828,8 @@ def handle(user_id: int, text: str, attachments: list) -> None:
         threading.Thread(target=_process, daemon=True).start()
         return
 
-    # ── 4. Fallthrough (unrecognized text) ───────────────────────────────────
-    with _session_lock:
-        state = s.get("state", "waiting_resume")
+    # ── Fallthrough ──────────────────────────────────────────────────────────
+    state = s.get("state", "waiting_resume")
     if state == "waiting_score":
         send(user_id, "📊 Жду ссылку на вакансию для анализа соответствия\nПример: https://hh.ru/vacancy/12345678\n\nИли /сброс чтобы выйти из режима анализа.")
     elif state == "waiting_both":
@@ -871,8 +843,6 @@ def handle(user_id: int, text: str, attachments: list) -> None:
     else:
         send(user_id, GREETING)
 
-
-# ── Background dispatcher for webhook ─────────────────────────────────────────
 def _safe_handle(user_id: int, text: str, attachments: list) -> None:
     try:
         handle(user_id, text, attachments)
@@ -880,7 +850,6 @@ def _safe_handle(user_id: int, text: str, attachments: list) -> None:
         logger.exception("Unhandled error for user %s: %s", user_id, e)
         send(user_id, "❌ Непредвиденная ошибка. Попробуй позже.")
 
-# ── Flask routes ──────────────────────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json or {}
@@ -891,28 +860,23 @@ def webhook():
         return jsonify({"status": "ok"})
     msg = data.get("object", {}).get("message", {})
     message_id = msg.get("id")
-    user_id    = msg.get("from_id")
-    text       = (msg.get("text") or "").strip()
+    user_id = msg.get("from_id")
+    text = (msg.get("text") or "").strip()
     attachments = msg.get("attachments") or []
     if not user_id or user_id < 0:
         return jsonify({"status": "ok"})
     if _is_duplicate_message(message_id):
-        logger.debug("⏭️ Duplicate msg_id=%s from user %s — skipped", message_id, user_id)
+        logger.debug("Duplicate msg_id=%s from user %s — skipped", message_id, user_id)
         return jsonify({"status": "ok"})
-    logger.info("📨 user=%s msg_id=%s text='%.60s' attachments=%d",
-                user_id, message_id, text, len(attachments))
-    threading.Thread(
-        target=_safe_handle,
-        args=(user_id, text, attachments),
-        daemon=True,
-    ).start()
+    logger.info("📨 user=%s msg_id=%s text='%.60s' attachments=%d", user_id, message_id, text, len(attachments))
+    threading.Thread(target=_safe_handle, args=(user_id, text, attachments), daemon=True).start()
     return jsonify({"status": "ok"})
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.7",
+        "version": "6.11",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -933,7 +897,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.7...")
+    logger.info("🚀 Starting ResumePro AI bot v6.11...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)

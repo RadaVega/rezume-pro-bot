@@ -1,9 +1,11 @@
 # services/resume_generator.py
 """
 Сервис генерации резюме с защитой от галлюцинаций.
-Версия: 5.3 – fixed language passing to _enrich_prompt
+Версия: 5.5 – synchronous, exponential backoff, language fixed.
 """
+
 import logging
+import time
 from typing import Tuple, Dict, Any
 from prompts.anti_hallucination import (
     SYSTEM_PROMPT_ANTI_HALLUCINATION_EN,
@@ -20,32 +22,39 @@ logger = logging.getLogger(__name__)
 class AntiHallucinationGenerator:
     """Генератор резюме с многоуровневой защитой от галлюцинаций."""
 
-    def __init__(self, gigachat_client, max_retries: int = 2):
+    def __init__(self, gigachat_client, max_retries: int = 3):
         self.gigachat = gigachat_client
         self.max_retries = max_retries
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _call_gigachat(self, prompt: str) -> str:
-        """Call GigaChat with a plain string prompt."""
-        try:
-            response = self.gigachat.chat(prompt)
-        except Exception as e:
-            logger.error(f"GigaChat call failed: {e}")
-            return ""
-        if hasattr(response, "choices") and response.choices:
-            content = response.choices[0].message.content
-            return content.strip() if content else ""
-        if isinstance(response, str):
-            return response.strip()
-        if hasattr(response, "text"):
-            return response.text.strip()
-        return str(response).strip()
+        """Call GigaChat with exponential backoff retry."""
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.gigachat.chat(prompt)
+                if hasattr(response, "choices") and response.choices:
+                    content = response.choices[0].message.content
+                    return content.strip() if content else ""
+                if isinstance(response, str):
+                    return response.strip()
+                if hasattr(response, "text"):
+                    return response.text.strip()
+                return str(response).strip()
+            except Exception as e:
+                logger.warning(f"GigaChat call failed on attempt {attempt+1}: {e}")
+                if attempt < self.max_retries:
+                    delay = 2 ** attempt  # 1, 2, 4 seconds
+                    logger.info(f"Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                else:
+                    logger.error("All retries exhausted.")
+                    return ""
+        return ""
 
     def _build_base_prompt(
         self, resume_text: str, vacancy_text: str, language: str = "ru"
     ) -> str:
-        """Return the correct system prompt based on language."""
         if language == "en":
             return SYSTEM_PROMPT_ANTI_HALLUCINATION_EN.format(
                 resume_text=resume_text,
@@ -59,11 +68,6 @@ class AntiHallucinationGenerator:
     def _enrich_prompt(
         self, base_prompt: str, resume_text: str, language: str = "ru"
     ) -> str:
-        """
-        Inject the exact list of allowed skills/companies/years into the prompt
-        so GigaChat has a concrete whitelist to check against.
-        The injected block is written in the same language as the prompt.
-        """
         from utils.validation import extract_entities, TECH_SKILLS
 
         entities = extract_entities(resume_text)
@@ -122,10 +126,7 @@ class AntiHallucinationGenerator:
 
         return base_prompt + "\n".join(lines)
 
-    def _build_retry_prompt(
-        self, base_prompt: str, issues: list, attempt: int
-    ) -> str:
-        """Append a correction note to the base prompt for a retry attempt."""
+    def _build_retry_prompt(self, base_prompt: str, issues: list, attempt: int) -> str:
         correction = RETRY_CORRECTION_SUFFIX.format(
             attempt=attempt,
             issues="; ".join(issues),
@@ -133,9 +134,7 @@ class AntiHallucinationGenerator:
         return base_prompt + correction
 
     @staticmethod
-    def _fallback_response(
-        resume_text: str, issues: list, language: str = "ru"
-    ) -> str:
+    def _fallback_response(resume_text: str, issues: list, language: str = "ru") -> str:
         attempt_count = len(issues)
         if language == "en":
             return (
@@ -165,11 +164,6 @@ class AntiHallucinationGenerator:
         vacancy_text: str,
         language: str = "ru",
     ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Generate an adapted resume with hallucination validation.
-        language: 'ru' or 'en' — controls both the prompt language and
-        the language of the enrichment block appended to the prompt.
-        """
         metadata: Dict[str, Any] = {
             "attempts": 0,
             "validation_passed": False,
@@ -180,53 +174,38 @@ class AntiHallucinationGenerator:
         base_prompt = self._enrich_prompt(
             self._build_base_prompt(resume_text, vacancy_text, language),
             resume_text,
-            language,           # ← FIXED: language passed
+            language,
         )
 
         for attempt in range(self.max_retries + 1):
             metadata["attempts"] = attempt + 1
-
             try:
                 prompt = (
                     base_prompt
                     if attempt == 0
-                    else self._build_retry_prompt(
-                        base_prompt, metadata["issues"], attempt
-                    )
+                    else self._build_retry_prompt(base_prompt, metadata["issues"], attempt)
                 )
                 adapted_text = self._call_gigachat(prompt)
                 if not adapted_text:
-                    logger.warning(f"Empty response on attempt {attempt + 1}")
+                    logger.warning(f"Empty response on attempt {attempt+1}")
                     continue
 
                 validation = validate_resume_facts(resume_text, adapted_text)
                 metadata["validation"] = validation
-
                 logger.info(
-                    f"Attempt {attempt + 1}: "
-                    f"{'PASS' if validation['is_safe'] else 'FAIL'} | "
-                    f"confidence={validation['confidence']:.2f} | "
-                    f"issues={len(validation['issues'])}"
+                    f"Attempt {attempt+1}: {'PASS' if validation['is_safe'] else 'FAIL'} | "
+                    f"confidence={validation['confidence']:.2f} | issues={len(validation['issues'])}"
                 )
-
                 if validation["is_safe"]:
                     metadata["validation_passed"] = True
                     return adapted_text, metadata
-
                 metadata["issues"] = validation["issues"]
-
             except Exception as e:
-                logger.error(f"Generation error on attempt {attempt + 1}: {e}")
+                logger.error(f"Generation error on attempt {attempt+1}: {e}")
 
         metadata["fallback_used"] = True
-        logger.error(
-            f"All {self.max_retries + 1} attempts failed. "
-            f"Last issues: {metadata['issues']}"
-        )
-        return (
-            self._fallback_response(resume_text, metadata["issues"], language),
-            metadata,
-        )
+        logger.error(f"All {self.max_retries+1} attempts failed. Using fallback.")
+        return self._fallback_response(resume_text, metadata["issues"], language), metadata
 
     def generate_cover_letter(
         self,
@@ -234,10 +213,6 @@ class AntiHallucinationGenerator:
         vacancy_text: str,
         language: str = "ru",
     ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Generate a cover letter in the specified language.
-        language: 'ru' or 'en'
-        """
         metadata: Dict[str, Any] = {
             "attempts": 0,
             "validation_passed": False,
@@ -245,54 +220,33 @@ class AntiHallucinationGenerator:
             "issues": [],
             "validation": None,
         }
-        prompt_template = (
-            SYSTEM_PROMPT_COVER_LETTER_EN if language == "en"
-            else SYSTEM_PROMPT_COVER_LETTER_RU
-        )
+        prompt_template = SYSTEM_PROMPT_COVER_LETTER_EN if language == "en" else SYSTEM_PROMPT_COVER_LETTER_RU
         base_prompt = self._enrich_prompt(
-            prompt_template.format(
-                resume_text=resume_text,
-                vacancy_text=vacancy_text,
-            ),
+            prompt_template.format(resume_text=resume_text, vacancy_text=vacancy_text),
             resume_text,
-            language,           # ← FIXED: language passed
+            language,
         )
 
         for attempt in range(self.max_retries + 1):
             metadata["attempts"] = attempt + 1
-
             try:
                 prompt = (
                     base_prompt
                     if attempt == 0
-                    else self._build_retry_prompt(
-                        base_prompt, metadata["issues"], attempt
-                    )
+                    else self._build_retry_prompt(base_prompt, metadata["issues"], attempt)
                 )
                 letter_text = self._call_gigachat(prompt)
                 if not letter_text:
-                    logger.warning(f"Empty cover letter on attempt {attempt + 1}")
+                    logger.warning(f"Empty cover letter on attempt {attempt+1}")
                     continue
-
-                logger.info(
-                    f"Cover letter attempt {attempt + 1}: "
-                    f"ACCEPTED (lang={language}, length={len(letter_text)})"
-                )
+                logger.info(f"Cover letter attempt {attempt+1}: ACCEPTED (lang={language}, length={len(letter_text)})")
                 metadata["validation_passed"] = True
                 return letter_text, metadata
-
             except Exception as e:
-                logger.error(f"Cover letter error on attempt {attempt + 1}: {e}")
+                logger.error(f"Cover letter error on attempt {attempt+1}: {e}")
 
         metadata["fallback_used"] = True
-        if language == "en":
-            fallback = (
-                "⚠️ Failed to generate a cover letter.\n\n"
-                "Please write it manually based on your resume."
-            )
-        else:
-            fallback = (
-                "⚠️ Не удалось сгенерировать сопроводительное письмо.\n\n"
-                "Пожалуйста, напишите его вручную на основе вашего резюме."
-            )
+        fallback = ( "⚠️ Failed to generate a cover letter.\n\nPlease write it manually based on your resume."
+                    if language == "en"
+                    else "⚠️ Не удалось сгенерировать сопроводительное письмо.\n\nПожалуйста, напишите его вручную на основе вашего резюме." )
         return fallback, metadata
