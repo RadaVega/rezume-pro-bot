@@ -1,8 +1,9 @@
-# main.py (v6.13 – file detection moved before commands)
+# main.py
 """
 ResumePro AI — VK Bot v6.13
-- File attachment detection now runs before any command.
-- Guaranteed return after file processing.
+- File detection runs before any command (fixes session reset)
+- Thread-safe deduplication, instant webhook return
+- Language override commands, forced English for LinkedIn
 """
 
 import sys as _sys
