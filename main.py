@@ -1,17 +1,13 @@
-# main.py
+# main.py (full corrected version with import os)
 """
-ResumePro AI — VK Bot v6.11
-- Robust file attachment detection (works with any VK attachment structure)
-- Debug logging for attachments
-- Guaranteed return after file upload
-- All commands, language override, session lock
+ResumePro AI — VK Bot v6.12
+- Fixed missing 'os' import
+- Robust file attachment detection
+- Debug logging
 """
 
-import sys as _sys, os as _os
-_PKGS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".pkgs")
-if _os.path.isdir(_PKGS) and _PKGS not in _sys.path:
-    _sys.path.insert(0, _PKGS)
-
+import sys as _sys
+import os   # <-- FIX: added this line
 import re
 import time
 import random
@@ -19,6 +15,10 @@ import logging
 import tempfile
 import threading
 from collections import OrderedDict
+
+_PKGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pkgs")
+if os.path.isdir(_PKGS) and _PKGS not in sys.path:
+    sys.path.insert(0, _PKGS)
 
 import requests as http_requests
 from flask import Flask, request, jsonify
@@ -125,7 +125,7 @@ GREETING = (
     "3. Получи адаптированную версию + Match Score\n\n"
     "💡 Команды:\n"
     "• /помощь   — справка\n"
-       "• /пример   — показать пример\n"
+    "• /пример   — показать пример\n"
     "• /анализ   — детальный анализ соответствия вакансии\n"
     "• /письмо   — написать сопроводительное письмо\n"
     "• /оба      — резюме + письмо одновременно\n"
@@ -456,7 +456,7 @@ def _cmd_letter_mode(user_id: int):
     send(user_id, f"✉️ Режим сопроводительного письма\nРезюме: {fname}\n\nПришли ссылку на вакансию с hh.ru — и я напишу письмо под неё.\nПример: https://hh.ru/vacancy/12345678\n\nДля отмены отправь /сброс")
 
 def _cmd_health(user_id: int):
-    send(user_id, f"✅ Бот работает! Версия 6.11\nАктивных сессий: {len(_sessions)}")
+    send(user_id, f"✅ Бот работает! Версия 6.12\nАктивных сессий: {len(_sessions)}")
 
 def _cmd_download(user_id: int):
     s = _get_session(user_id)
@@ -876,7 +876,7 @@ def webhook():
 def health():
     return jsonify({
         "status": "healthy",
-        "version": "6.11",
+        "version": "6.12",
         "vk_group_id": Config.VK_GROUP_ID,
         "gigachat_connected": bool(Config.GIGACHAT_API_KEY),
         "active_sessions": len(_sessions),
@@ -897,7 +897,7 @@ def validate_endpoint():
     return jsonify(result)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting ResumePro AI bot v6.11...")
+    logger.info("🚀 Starting ResumePro AI bot v6.12...")
     logger.info("📋 Config: VK_GROUP_ID=%s, PORT=%s", Config.VK_GROUP_ID, Config.PORT)
     threading.Thread(target=_session_cleanup, daemon=True).start()
     app.run(host="0.0.0.0", port=Config.PORT, debug=False, threaded=True)
